@@ -27,9 +27,9 @@ Click the gauge in the right side of the top bar for provider details. A red/yel
 
 Open the popup's **Settings** action (or run `gnome-extensions prefs agent-quota@torridfish`) to:
 
-- override `config.toml` and choose exactly which providers appear;
-- configure refresh interval, colour thresholds and popup spacing;
-- manage all provider-specific options from one **Providers** page, grouped by provider: for cookie-authenticated providers, select its cookie browser (applied on top of the `config.toml` provider set, without enabling the provider override) and open its sign-in page; for OpenCode Go and Colab, copy the CLI sign-in command (`opencode auth login`, `colab usage`); choose which detected Codex workspaces appear; for API-authenticated providers, save its API key; and adjust its popup layout options (including reset time at 100%).
+- override `config.toml`, choose which providers appear, and reorder them via **Move up / Move down** buttons;
+- configure refresh interval, colour thresholds, progress style (`Circular` gauges by default, or full-width `Bar` meters), multi-column provider layout, and popup spacing;
+- manage all provider-specific options from one **Providers** page, grouped by provider: for cookie-authenticated providers, select its cookie browser (applied on top of the `config.toml` provider set, without enabling the provider override) and open its sign-in page; for OpenCode Go and Colab, copy the CLI sign-in command (`opencode auth login`, `colab usage`); choose which detected Codex workspaces appear; for API-authenticated providers, save its API key; and adjust its popup layout options (including reset time at 100% and starting a new provider column).
 
 **Appearance → Popup → Show user information** is on by default. It controls the account name shown next to each provider's plan in the popup header; switching it off keeps only the plan, so the header shows neither the user nor the provider-source fallback. This is a presentation-only, GNOME-only switch: it does not change the payload, cache, or CLI output, and it is not data redaction — the extension still fetches and stores the same account data.
 
@@ -61,6 +61,7 @@ agent-quota --only moonshot       # Kimi / Moonshot balance only
 agent-quota --only colab          # Google Colab compute units only
 agent-quota --view usage          # usage-based limits table, including the Colab compute-unit balance
 agent-quota --view payg           # show only the pay-as-you-go quota table
+agent-quota --no-user             # hide the User column in terminal tables (or set show_user = false in config.toml)
 agent-quota --browser firefox     # cookie source for cookie-auth providers
 agent-quota --browser firefox --provider-browser claude=chrome   # per-provider cookie source; overrides --browser for that provider
 ```
@@ -97,7 +98,7 @@ For API-auth providers, `agent-quota setup` also offers to collect the key inlin
 
 Supported cookie sources: `chrome`, `chromium`, `brave`, `edge`, `firefox`, `helium`. The first one that has a valid session wins. Override order with `--browser <name>` (repeatable), or for a single provider with `--provider-browser KEY=NAME` (repeatable, e.g. `--provider-browser claude=firefox`). Cookie-authenticated providers cache per browser preference, so switching browsers never returns another browser's cached account.
 
-**Gemini (Antigravity) pools.** Antigravity shares quota across model families: each pool (`Gemini`, `Claude/GPT`, and `Argon` on paid plans) has its own 5-hour and 7d window, consumed proportionally to token cost. Every pool reported for your account gets its own bar; a pool with no measured data simply doesn't appear. The plan is taken from the account's paid tier (`g1-pro-tier` → Pro, `g1-ultra-tier` → Ultra), so a Pro or Ultra subscription is not reported as Free.
+**Gemini (Antigravity) pools.** Antigravity shares quota across model families: each pool (`Gemini`, `C/C`, and `Argon` on paid plans) has its own 5-hour and 7d window, consumed proportionally to token cost. Every pool reported for your account gets its own bar; a pool with no measured data simply doesn't appear. The plan is taken from the account's paid tier (`g1-pro-tier` → Pro, `g1-ultra-tier` → Ultra), so a Pro or Ultra subscription is not reported as Free.
 
 **Zen workspaces.** If your opencode.ai account has several workspaces, the balance shown is the first one listed from the console API. Set `WORKSPACE_ID` in `~/.config/agent-quota/zen.conf` to pin a workspace (the balance is cached for 120 seconds per workspace, so the next run after editing the config picks up the change):
 
