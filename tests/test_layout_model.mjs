@@ -1,0 +1,241 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import test from 'node:test';
+
+function loadModule(name) {
+    const source = readFileSync(
+        new URL(`../gnome-shell-extension/${name}`, import.meta.url),
+        'utf8',
+    );
+    return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+}
+
+const {
+    DEFAULT_LAYOUT_COLUMNS,
+    defaultLayout,
+    layoutGrid,
+    layoutToJson,
+    moveGauge,
+    moveProvider,
+    normalizeLayoutColumns,
+    normalizeMetricOrder,
+    packLayout,
+    parseLayout,
+    providerGridSpan,
+    reorderProviders,
+    setProviderGaugeColumns,
+} = await loadModule('layout-model.js');
+
+const metrics = new Map([
+    ['claude', ['5h', '7d']],
+    ['codex', ['5h', '7d', 'Credits']],
+    ['gemini', []],
+]);
+
+test('columns are clamped to the supported global grid', () => {
+    assert.equal(normalizeLayoutColumns(0), 1);
+    assert.equal(normalizeLayoutColumns(9), 5);
+    assert.equal(normalizeLayoutColumns('2'), 2);
+    assert.equal(normalizeLayoutColumns(undefined), DEFAULT_LAYOUT_COLUMNS);
+});
+
+test('metric order keeps saved labels and appends new backend metrics', () => {
+    assert.deepEqual(
+        normalizeMetricOrder(['7d', 'stale', '5h'], ['5h', '7d', 'Credits']),
+        ['7d', '5h', 'Credits'],
+    );
+    assert.deepEqual(normalizeMetricOrder(['7d', '5h'], []), ['7d', '5h']);
+});
+
+test('a card wraps its gauges instead of leaving an empty requested column', () => {
+    const span = providerGridSpan(
+        {id: 'claude', gaugeColumns: 3, order: ['5h', '7d']},
+        ['5h', '7d'],
+        3,
+    );
+    assert.equal(span.gaugeColumns, 2);
+    assert.equal(span.gaugeRows, 1);
+    assert.equal(span.w, 2);
+    assert.equal(span.h, 2);
+});
+
+test('a provider with no metrics is a header-only card', () => {
+    const span = providerGridSpan({id: 'gemini', gaugeColumns: 3, order: []}, [], 3);
+    assert.equal(span.w, 1);
+    assert.equal(span.h, 1);
+    assert.equal(span.gaugeRows, 0);
+});
+
+test('default layout packs cards without overlap', () => {
+    const layout = defaultLayout(['claude', 'codex', 'gemini'], metrics, {
+        columns: 3,
+        gaugeColumns: 3,
+    });
+    assert.equal(layout.columns, 3);
+    const byId = new Map(layout.providers.map(provider => [provider.id, provider]));
+    assert.deepEqual(
+        {col: byId.get('claude').col, row: byId.get('claude').row},
+        {col: 0, row: 0},
+    );
+    // Claude is 2 columns wide; Codex needs all 3, so it starts below.
+    assert.deepEqual(
+        {col: byId.get('codex').col, row: byId.get('codex').row},
+        {col: 0, row: 2},
+    );
+    assert.deepEqual(
+        {col: byId.get('gemini').col, row: byId.get('gemini').row},
+        {col: 2, row: 0},
+    );
+});
+
+test('layoutGrid aligns gauges to the same global columns and row tracks', () => {
+    const layout = defaultLayout(['claude', 'codex'], metrics, {
+        columns: 3,
+        gaugeColumns: 3,
+    });
+    const grid = layoutGrid(layout, metrics, {
+        cellWidth: 50,
+        columnGap: 10,
+        rowGap: 8,
+        headerHeight: 20,
+        cellHeight: 60,
+    });
+    const claude = grid.providers.find(provider => provider.id === 'claude');
+    const codex = grid.providers.find(provider => provider.id === 'codex');
+
+    assert.equal(grid.width, 3 * 50 + 2 * 10);
+    assert.equal(claude.width, 2 * 50 + 10);
+    assert.equal(codex.width, 3 * 50 + 2 * 10);
+    assert.deepEqual(claude.gauges.map(gauge => gauge.x), [0, 60]);
+    assert.deepEqual(codex.gauges.map(gauge => gauge.x), [0, 60, 120]);
+    // Claude starts at row 0, Codex at row 2.  Their gauge rows still use the
+    // same global row heights.
+    assert.deepEqual(claude.gauges.map(gauge => gauge.y), [28, 28]);
+    assert.deepEqual(codex.gauges.map(gauge => gauge.y), [124, 124, 124]);
+    assert.equal(claude.height, 20 + 8 + 60);
+    assert.equal(codex.height, 20 + 8 + 60);
+});
+
+test('a colliding explicit position is re-packed instead of overlapping', () => {
+    const layout = packLayout({
+        columns: 2,
+        providers: [
+            {id: 'a', col: 0, row: 0, gaugeColumns: 1, order: ['x']},
+            {id: 'b', col: 0, row: 0, gaugeColumns: 1, order: ['x']},
+        ],
+    }, new Map([['a', ['x']], ['b', ['x']]]));
+    const byId = new Map(layout.providers.map(provider => [provider.id, provider]));
+    assert.notDeepEqual(
+        {col: byId.get('a').col, row: byId.get('a').row},
+        {col: byId.get('b').col, row: byId.get('b').row},
+    );
+});
+
+test('parseLayout tolerates invalid JSON and appends missing providers', () => {
+    const fallback = parseLayout('{not json', ['claude', 'codex'], metrics, {columns: 2});
+    assert.equal(fallback.providers.length, 2);
+
+    const parsed = parseLayout(JSON.stringify({
+        version: 1,
+        columns: 2,
+        providers: [{id: 'claude', gaugeColumns: 1, order: ['7d']}],
+    }), ['claude', 'codex', 'gemini'], metrics, {columns: 2});
+    assert.deepEqual(parsed.providers.map(provider => provider.id), ['claude', 'codex', 'gemini']);
+    assert.deepEqual(parsed.providers[0].order, ['7d', '5h']);
+});
+
+test('moveGauge, moveProvider, and reorderProviders update the model', () => {
+    const layout = defaultLayout(['claude', 'codex'], metrics, {columns: 3, gaugeColumns: 2});
+    const movedGauge = moveGauge(layout, 'claude', 0, 1);
+    assert.deepEqual(movedGauge.providers[0].order, ['7d', '5h']);
+
+    const movedProvider = moveProvider(layout, 'codex', 1, 2, metrics, {columns: 3});
+    const codex = movedProvider.providers.find(provider => provider.id === 'codex');
+    assert.deepEqual({col: codex.col, row: codex.row}, {col: 1, row: 2});
+
+    const reordered = reorderProviders(layout, 1, 0, metrics, {columns: 3});
+    assert.deepEqual(reordered.providers.map(provider => provider.id), ['codex', 'claude']);
+});
+
+test('setProviderGaugeColumns and layoutToJson round-trip', () => {
+    const layout = defaultLayout(['claude'], metrics, {columns: 3, gaugeColumns: 3});
+    const changed = setProviderGaugeColumns(layout, 'claude', 1, 3);
+    assert.equal(changed.providers[0].gaugeColumns, 1);
+    const parsed = JSON.parse(layoutToJson(changed));
+    assert.equal(parsed.providers[0].gaugeColumns, 1);
+});
+
+test('packLayout removes empty rows left by a shrinking card', () => {
+    const layout = packLayout({
+        columns: 3,
+        providers: [
+            {id: 'a', col: 0, row: 0, gaugeColumns: 3, order: ['x']},
+            {id: 'b', col: 0, row: 5, gaugeColumns: 3, order: ['x']},
+        ],
+    }, new Map([['a', ['x']], ['b', ['x']]]));
+    const byId = new Map(layout.providers.map(provider => [provider.id, provider]));
+    // a is header + one gauge row (rows 0-1); b is moved up to row 2.
+    assert.equal(byId.get('b').row, 2);
+});
+
+test('layoutGrid applies one card padding to the header and every gauge cell', () => {
+    const layout = {
+        columns: 2,
+        providers: [{id: 'a', col: 0, row: 0, gaugeColumns: 2, order: ['x', 'y']}],
+    };
+    const grid = layoutGrid(layout, new Map([['a', ['x', 'y']]]), {
+        cellWidth: 80,
+        columnGap: 10,
+        rowGap: 8,
+        headerHeight: 40,
+        cellHeight: 60,
+        padding: 10,
+    });
+    const card = grid.providers[0];
+    assert.equal(card.header.x, 10);
+    assert.equal(card.header.y, 10);
+    assert.equal(card.header.width, card.width - 20);
+    assert.equal(card.header.height, 20);
+    assert.deepEqual(card.gauges.map(gauge => gauge.x), [10, 100]);
+    assert.deepEqual(card.gauges.map(gauge => gauge.width), [60, 60]);
+    assert.deepEqual(card.gauges.map(gauge => gauge.y), [58, 58]);
+    assert.deepEqual(card.gauges.map(gauge => gauge.height), [40, 40]);
+});
+
+test('layoutGrid insets the card background without moving the content tracks', () => {
+    const layout = {
+        columns: 2,
+        providers: [{id: 'a', col: 0, row: 0, gaugeColumns: 2, order: ['x', 'y']}],
+    };
+    const grid = layoutGrid(layout, new Map([['a', ['x', 'y']]]), {
+        cellWidth: 80,
+        columnGap: 10,
+        rowGap: 8,
+        headerHeight: 40,
+        cellHeight: 60,
+        padding: 10,
+        cardGap: 6,
+    });
+    const card = grid.providers[0];
+    assert.equal(card.card.x, 3);
+    assert.equal(card.card.width, card.width - 6);
+    assert.equal(card.header.x, 13);
+    assert.equal(card.gauges[0].x, 13);
+    assert.equal(card.gauges[1].x, 103);
+});
+
+test('a provider detected with every gauge hidden becomes a header-only card', () => {
+    const layout = parseLayout(
+        JSON.stringify({
+            version: 1,
+            columns: 3,
+            providers: [{id: 'claude', gaugeColumns: 3, order: ['5h', '7d']}],
+        }),
+        ['claude'],
+        new Map([['claude', []]]),
+        {columns: 3, gaugeColumns: 3},
+    );
+    assert.deepEqual(layout.providers[0].order, []);
+    assert.equal(layout.providers[0].w, 1);
+    assert.equal(layout.providers[0].h, 1);
+});
