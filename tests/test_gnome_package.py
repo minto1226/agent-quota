@@ -53,7 +53,18 @@ class GnomePackageTests(unittest.TestCase):
             self.assertTrue((EXTENSION_DIR / name).is_file(), f"{name} does not exist")
             pending.extend(_relative_imports(name))
         # Sanity: the walk actually reached the extracted helpers.
-        self.assertTrue({"reset-display.js", "secret-config.js"} <= seen)
+        self.assertTrue({"reset-display.js", "layout-model.js", "meter-layout.js"} <= seen)
+
+    def test_web_settings_and_server_are_packaged(self) -> None:
+        packaged = PACK_DEFAULTS | _zip_additions()
+        self.assertIn("settings_server.py", packaged)
+        self.assertIn("web-settings", packaged)
+        for name in ("index.html", "settings.js", "layout-editor.js", "settings.css", "providers.json", "gauge.svg"):
+            self.assertTrue((EXTENSION_DIR / "web-settings" / name).is_file(), f"{name} is missing")
+        # The launcher points at the packaged server and web directory.
+        prefs = (EXTENSION_DIR / "prefs.js").read_text()
+        self.assertIn("settings_server.py", prefs)
+        self.assertIn("web-settings", prefs)
 
 
 class GnomeMetricLabelTests(unittest.TestCase):
@@ -62,7 +73,7 @@ class GnomeMetricLabelTests(unittest.TestCase):
         # the extension must render metric.label verbatim.
         source = (EXTENSION_DIR / "extension.js").read_text()
         self.assertNotRegex(source, r"['\"`]7d [A-Z]")
-        self.assertIn("${metric.label}: ${metric.value}", source)
+        self.assertIn("${metric.label}: ${displayMetricValue(metric)}", source)
 
 
 if __name__ == "__main__":
