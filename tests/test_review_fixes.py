@@ -28,7 +28,7 @@ class ClaudeWindowTests(unittest.TestCase):
         }
         windows = dict(claude_limit_windows(usage))
         self.assertEqual(windows["7d"].get("resets_at"), 1790000000)
-        self.assertEqual(windows["7d Fable"].get("resets_at"), 1790000000)
+        self.assertEqual(windows["Fable 7d"].get("resets_at"), 1790000000)
 
     def test_distinct_model_windows_keep_their_own_labels(self) -> None:
         usage = {
@@ -47,8 +47,8 @@ class ClaudeWindowTests(unittest.TestCase):
             ]
         }
         windows = dict(claude_limit_windows(usage))
-        self.assertEqual(windows["7d Sonnet"]["percent"], 40)
-        self.assertEqual(windows["7d Fable"]["percent"], 10)
+        self.assertEqual(windows["Sonnet 7d"]["percent"], 40)
+        self.assertEqual(windows["Fable 7d"]["percent"], 10)
 
     def test_missing_shared_reset_leaves_model_window_reset_untouched(self) -> None:
         usage = {
@@ -61,7 +61,7 @@ class ClaudeWindowTests(unittest.TestCase):
             ]
         }
         windows = dict(claude_limit_windows(usage))
-        self.assertIsNone(windows["7d Fable"].get("resets_at"))
+        self.assertIsNone(windows["Fable 7d"].get("resets_at"))
 
 
 class ErrorClassificationTests(unittest.TestCase):

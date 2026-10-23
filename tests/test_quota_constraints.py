@@ -146,7 +146,8 @@ class GoWindowLabelTests(unittest.TestCase):
         self.assertEqual(_go_window_label("weeklyUsage"), "7d")
         self.assertEqual(_go_window_label("rolling"), "5h")
         self.assertEqual(_go_window_label("rollingUsage"), "5h")
-        self.assertEqual(_go_window_label("monthly"), "Monthly")
+        self.assertEqual(_go_window_label("monthly"), "30d")
+        self.assertEqual(_go_window_label("monthlyUsage"), "30d")
 
     def test_go_windows_display_7d_but_keep_raw_weekly_key(self) -> None:
         usage = {

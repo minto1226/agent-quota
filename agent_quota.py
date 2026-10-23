@@ -408,6 +408,8 @@ def _adapt_go(raw: dict) -> list[Metric]:
         # off the 7d window, so normalize before rendering.
         if label == "Weekly":
             label = "7d"
+        elif label == "Monthly":
+            label = "30d"
         used_pct = float(w["usage_percent"])
         pct = max(0.0, min(100.0, 100.0 - used_pct))
         reset_at = w.get("reset_at")
