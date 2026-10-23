@@ -301,9 +301,9 @@ def _adapt_zai(raw: dict) -> list[Metric]:
         ]
 
     def order(item: dict) -> int:
-        if item.get("type") == "TOKENS_LIMIT" and item.get("unit") == 3:
+        if item.get("type") in ("TOKENS_LIMIT", "CREDIT_LIMIT") and item.get("unit") == 3:
             return 0
-        if item.get("type") == "TOKENS_LIMIT" and item.get("unit") == 6:
+        if item.get("type") in ("TOKENS_LIMIT", "CREDIT_LIMIT") and item.get("unit") == 6:
             return 1
         if item.get("type") == "TIME_LIMIT":
             return 2
@@ -323,7 +323,7 @@ def _adapt_zai(raw: dict) -> list[Metric]:
         limit_type = limit.get("type")
         unit = limit.get("unit")
 
-        if limit_type == "TOKENS_LIMIT":
+        if limit_type in ("TOKENS_LIMIT", "CREDIT_LIMIT"):
             label = "5h" if unit == 3 else "7d" if unit == 6 else "Tokens"
             value = f"{pct:.0f}%"
         elif limit_type == "TIME_LIMIT":
@@ -338,7 +338,7 @@ def _adapt_zai(raw: dict) -> list[Metric]:
                 else "7d" if unit == 6
                 else str(limit_type or "Window").replace("_", " ").title()
             )
-            value = _remaining_value(limit, pct)
+            value = f"{pct:.0f}%" if unit in (3, 6) else _remaining_value(limit, pct)
 
         metrics.append(
             Metric(

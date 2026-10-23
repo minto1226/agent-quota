@@ -223,7 +223,8 @@ class ZaiWindowTests(unittest.TestCase):
         }
         metrics = _adapt_zai(raw)
         self.assertEqual([m.label for m in metrics], ["5h", "7d"])
-        self.assertEqual(metrics[0].value, "11905 / 12000")
+        self.assertEqual(metrics[0].value, "99%")
+        self.assertEqual(metrics[1].value, "78%")
         self.assertAlmostEqual(metrics[0].pct, 99.0)
         self.assertTrue(metrics[1].is_blocking_period)
 
