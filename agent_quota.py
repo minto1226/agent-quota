@@ -877,18 +877,21 @@ def load_config() -> dict | None:
         return None
 
 
-def save_config(enabled: list[str]) -> None:
+def save_config(enabled: list[str], *, show_user: bool = True) -> None:
     """Persist the enabled-provider list as TOML.
 
-    Hand-written rather than using a TOML writer dep — the schema is one line.
+    Hand-written rather than using a TOML writer dep — the schema is minimal.
     """
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     body = ", ".join(f'"{k}"' for k in enabled)
-    CONFIG_PATH.write_text(
-        "# agent-quota configuration\n"
-        "# Edit this file or run `agent-quota setup` to change.\n"
-        f"enabled = [{body}]\n"
-    )
+    lines = [
+        "# agent-quota configuration",
+        "# Edit this file or run `agent-quota setup` to change.",
+        f"enabled = [{body}]",
+    ]
+    if not show_user:
+        lines.append("show_user = false")
+    CONFIG_PATH.write_text("\n".join(lines) + "\n")
 
 
 def _load_secret_value(path: Path, key: str) -> str | None:
@@ -950,7 +953,9 @@ def run_setup() -> int:
         "[cyan]agent-quota setup[/] later to change.\n"
     )
 
-    existing = (load_config() or {}).get("enabled") or list(PROVIDER_META)
+    existing_cfg = load_config() or {}
+    existing = existing_cfg.get("enabled") or list(PROVIDER_META)
+    existing_show_user = bool(existing_cfg.get("show_user", True))
     enabled: list[str] = []
     for key, meta in PROVIDER_META.items():
         name = meta.name
@@ -965,7 +970,11 @@ def run_setup() -> int:
         console.print("[yellow]No providers selected — config not saved.[/]")
         return 1
 
-    save_config(enabled)
+    show_user = Confirm.ask(
+        "  Show user column in terminal table?",
+        default=existing_show_user,
+    )
+    save_config(enabled, show_user=show_user)
     console.print(f"[green]✓ saved[/] [dim]{CONFIG_PATH}[/]")
     return 0
 
@@ -1263,7 +1272,12 @@ class _WindowUsageLine:
 
 
 def _render_table(
-    statuses: list[ProviderStatus], *, title: str, label_header: str, value_header: str
+    statuses: list[ProviderStatus],
+    *,
+    title: str,
+    label_header: str,
+    value_header: str,
+    show_user: bool = True,
 ) -> Table:
     label_width = min(
         12, max((len(m.label) for s in statuses for m in s.metrics), default=0)
@@ -1282,7 +1296,8 @@ def _render_table(
         Text("Provider", justify="center"), no_wrap=True, vertical="middle"
     )
     table.add_column(Text("Plan", justify="center"), no_wrap=True, vertical="middle")
-    table.add_column(Text("User", justify="center"), no_wrap=True, vertical="middle")
+    if show_user:
+        table.add_column(Text("User", justify="center"), no_wrap=True, vertical="middle")
     # Custom Text header so we can center "Usage" without setting
     # justify="center" on the column itself — that would shrink the _UsageBar
     # to its measured minimum and pad around it instead of filling the column.
@@ -1303,24 +1318,18 @@ def _render_table(
         state = Text(_STATE_LABEL[s.state], style=_STATE_STYLE[s.state])
 
         if s.state != "ok":
-            table.add_row(
-                s.name,
-                state,
-                "—",
-                Text(s.error or "(no detail)", style="dim"),
-                "—",
-                end_section=end_section,
-            )
+            row = [s.name, state]
+            if show_user:
+                row.append("—")
+            row.extend([Text(s.error or "(no detail)", style="dim"), "—"])
+            table.add_row(*row, end_section=end_section)
             continue
         if not s.metrics:
-            table.add_row(
-                s.name,
-                s.plan or "Unknown",
-                s.user or "—",
-                Text("no data", style="dim"),
-                "—",
-                end_section=end_section,
-            )
+            row = [s.name, s.plan or "Unknown"]
+            if show_user:
+                row.append(s.user or "—")
+            row.extend([Text("no data", style="dim"), "—"])
+            table.add_row(*row, end_section=end_section)
             continue
 
         # Pad name/status with leading blank lines so they land on the visual
@@ -1333,15 +1342,11 @@ def _render_table(
         usage = Group(*(_WindowUsageLine(m, label_width) for m in s.metrics))
         name_cell = Text(pad + s.name)
         plan_cell = Text(pad + (s.plan or "Unknown"))
-        user_cell = Text(pad + (s.user or "—"))
-        table.add_row(
-            name_cell,
-            plan_cell,
-            user_cell,
-            usage,
-            resets,
-            end_section=end_section,
-        )
+        row = [name_cell, plan_cell]
+        if show_user:
+            row.append(Text(pad + (s.user or "—")))
+        row.extend([usage, resets])
+        table.add_row(*row, end_section=end_section)
     return table
 
 
@@ -1391,7 +1396,7 @@ def _render_payg_table(statuses: list[ProviderStatus]) -> Table:
     return table
 
 
-def render_tables(statuses: list[ProviderStatus]):
+def render_tables(statuses: list[ProviderStatus], *, show_user: bool = True):
     usage_statuses = [s for s in statuses if s.mode == "usage"]
     payg_statuses = [s for s in statuses if s.mode == "payg"]
     tables = []
@@ -1402,6 +1407,7 @@ def render_tables(statuses: list[ProviderStatus]):
                 title="Usage-Based Limits",
                 label_header="Window",
                 value_header="Usage / Remaining",
+                show_user=show_user,
             )
         )
     if payg_statuses:
@@ -1412,6 +1418,7 @@ def render_tables(statuses: list[ProviderStatus]):
             title="agent-quota",
             label_header="Window",
             value_header="Usage / Remaining",
+            show_user=show_user,
         )
     if len(tables) == 1:
         return tables[0]
@@ -1491,6 +1498,13 @@ def main() -> int:
         "overrides --browser for that provider.",
     )
     parser.add_argument(
+        "--user",
+        dest="show_user",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show or hide the User column in terminal tables (overrides show_user in config.toml).",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON instead of terminal tables (for desktop integrations).",
@@ -1513,6 +1527,8 @@ def main() -> int:
     keys = _resolve_keys(args, all_providers)
     if keys is None:
         return 2
+    cfg = load_config() or {}
+    show_user = args.show_user if args.show_user is not None else bool(cfg.get("show_user", True))
     providers = {k: all_providers[k] for k in keys}
     if args.view != "both":
         providers = {k: p for k, p in providers.items() if p.mode == args.view}
@@ -1531,7 +1547,7 @@ def main() -> int:
         if args.json:
             print(json.dumps(_status_json(statuses), ensure_ascii=False))
             return 0 if all(s.state == "ok" for s in statuses) else 1
-        console.print(render_tables(statuses))
+        console.print(render_tables(statuses, show_user=show_user))
         return 0 if all(s.state == "ok" for s in statuses) else 1
 
     interval = max(1, args.watch)
@@ -1539,7 +1555,7 @@ def main() -> int:
         with Live(console=console, refresh_per_second=4, screen=True) as live:
             while True:
                 statuses = fetch_all(providers, browsers, provider_browsers)
-                live.update(render_tables(statuses))
+                live.update(render_tables(statuses, show_user=show_user))
                 time.sleep(interval)
     except KeyboardInterrupt:
         return 0

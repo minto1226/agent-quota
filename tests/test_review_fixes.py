@@ -244,5 +244,24 @@ class ZaiWindowTests(unittest.TestCase):
         self.assertEqual(metrics[0].value, "6 / 10")
 
 
+class CliUserVisibilityTests(unittest.TestCase):
+    def test_render_table_omits_user_column_when_show_user_is_false(self) -> None:
+        status = agent_quota.ProviderStatus(
+            key="claude",
+            name="Claude",
+            mode="usage",
+            plan="Team (Elsa Lab)",
+            user="person@example.com",
+            metrics=[agent_quota.Metric("5h", "100%", 100.0, "—", is_remaining=True)],
+        )
+        with_user = agent_quota.render_tables([status], show_user=True)
+        without_user = agent_quota.render_tables([status], show_user=False)
+
+        self.assertEqual(len(with_user.columns), 5)
+        self.assertEqual(len(without_user.columns), 4)
+        headers = [col.header.plain for col in without_user.columns]
+        self.assertEqual(headers, ["Provider", "Plan", "Usage / Remaining", "Reset"])
+
+
 if __name__ == "__main__":
     unittest.main()
