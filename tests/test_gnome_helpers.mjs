@@ -18,6 +18,21 @@ function loadModule(name) {
 
 const {resetText, shouldShowReset} = await loadModule('reset-display.js');
 const {providerHeader} = await loadModule('provider-header.js');
+const {
+    chunkCircleMetrics,
+    chunkProviderColumns,
+    circleArcAngles,
+    circlePercentText,
+    headerSpacingKeyForStyle,
+    isPercentageMetric,
+    meterFillColor,
+    normalizeCircleTextPosition,
+    normalizeMeterStyle,
+    normalizeProviderOrder,
+    orderProviderStatuses,
+    paddingKeyForStyle,
+    spacingKeyForStyle,
+} = await loadModule('meter-layout.js');
 
 // --- F1: reset display tolerates providers missing from the schema ---
 
@@ -190,4 +205,191 @@ test('extension renders headers through provider-header.js and the setting', () 
     // The generic `changed` fallback rerenders from the cached payload; the
     // switch must not trigger a provider refetch.
     assert.ok(!extensionSource.includes("key === 'show-user-info'"));
+});
+
+// --- meter-style: circular progress layout helpers, schema, and preferences ---
+
+test('normalizeMeterStyle defaults to circle and accepts bar', () => {
+    assert.equal(normalizeMeterStyle('circle'), 'circle');
+    assert.equal(normalizeMeterStyle('bar'), 'bar');
+    assert.equal(normalizeMeterStyle(''), 'circle');
+    assert.equal(normalizeMeterStyle(null), 'circle');
+    assert.equal(normalizeMeterStyle(undefined), 'circle');
+    assert.equal(normalizeMeterStyle('unknown'), 'circle');
+});
+
+test('normalizeCircleTextPosition defaults to below and accepts right', () => {
+    assert.equal(normalizeCircleTextPosition('below'), 'below');
+    assert.equal(normalizeCircleTextPosition('right'), 'right');
+    assert.equal(normalizeCircleTextPosition(''), 'below');
+    assert.equal(normalizeCircleTextPosition(null), 'below');
+    assert.equal(normalizeCircleTextPosition(undefined), 'below');
+});
+
+test('isPercentageMetric distinguishes numeric percentages from text-only balances', () => {
+    assert.equal(isPercentageMetric({label: '5h', value: '0%', pct: 0}), true);
+    assert.equal(isPercentageMetric({label: '7d', value: '100%', pct: 100}), true);
+    assert.equal(isPercentageMetric({label: 'Balance', value: '$4.20', pct: null}), false);
+    assert.equal(isPercentageMetric({label: 'Balance', value: '$4.20'}), false);
+    assert.equal(isPercentageMetric(null), false);
+});
+
+test('chunkCircleMetrics packs compact 3-window providers into a single 3-column row', () => {
+    const claudeMetrics = [
+        {label: '5h', value: '100%', pct: 100},
+        {label: '7d', value: '89%', pct: 89},
+        {label: 'Fable 7d', value: '89%', pct: 89},
+    ];
+    const rows = chunkCircleMetrics(claudeMetrics);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0].map(m => m.label), ['5h', '7d', 'Fable 7d']);
+});
+
+test('chunkCircleMetrics arranges metrics in column-major order across configured columns', () => {
+    const geminiMetrics = [
+        {label: 'Gemini 5h', value: '99%', pct: 99},
+        {label: 'C/C 5h', value: '100%', pct: 100},
+        {label: 'Gemini 7d', value: '99%', pct: 99},
+        {label: 'C/C 7d', value: '100%', pct: 100},
+        {label: 'Argon 7d', value: '90%', pct: 90},
+    ];
+    assert.deepEqual(
+        chunkCircleMetrics(geminiMetrics, 3).map(row => row.map(m => m.label)),
+        [
+            ['Gemini 5h', 'Gemini 7d', 'Argon 7d'],
+            ['C/C 5h', 'C/C 7d'],
+        ],
+    );
+    assert.deepEqual(
+        chunkCircleMetrics(geminiMetrics, 2).map(row => row.map(m => m.label)),
+        [
+            ['Gemini 5h', 'C/C 7d'],
+            ['C/C 5h', 'Argon 7d'],
+            ['Gemini 7d'],
+        ],
+    );
+    assert.deepEqual(
+        chunkCircleMetrics(geminiMetrics, 1).map(row => row.length),
+        [1, 1, 1, 1, 1],
+    );
+});
+
+test('chunkCircleMetrics skips non-percentage metrics', () => {
+    const mixed = [
+        {label: 'Balance', value: '$10.00', pct: null},
+    ];
+    assert.deepEqual(chunkCircleMetrics(mixed), []);
+});
+
+test('chunkProviderColumns splits providers by column count or explicit break keys', () => {
+    const statuses = [
+        {key: 'claude'},
+        {key: 'codex'},
+        {key: 'zai'},
+        {key: 'gemini'},
+        {key: 'go'},
+    ];
+    assert.deepEqual(
+        chunkProviderColumns(statuses, 1, []).map(col => col.map(s => s.key)),
+        [['claude', 'codex', 'zai', 'gemini', 'go']],
+    );
+    assert.deepEqual(
+        chunkProviderColumns(statuses, 2, []).map(col => col.map(s => s.key)),
+        [
+            ['claude', 'codex', 'zai'],
+            ['gemini', 'go'],
+        ],
+    );
+    assert.deepEqual(
+        chunkProviderColumns(statuses, 1, ['zai', 'go']).map(col => col.map(s => s.key)),
+        [
+            ['claude', 'codex'],
+            ['zai', 'gemini'],
+            ['go'],
+        ],
+    );
+});
+
+test('normalizeProviderOrder and orderProviderStatuses sort providers while preserving multi-workspace order', () => {
+    assert.deepEqual(
+        normalizeProviderOrder(['gemini', 'claude'], ['claude', 'codex', 'gemini', 'go']),
+        ['gemini', 'claude', 'codex', 'go'],
+    );
+    const statuses = [
+        {key: 'claude', workspace_id: ''},
+        {key: 'codex', workspace_id: 'ws-1'},
+        {key: 'codex', workspace_id: 'ws-2'},
+        {key: 'gemini', workspace_id: ''},
+    ];
+    assert.deepEqual(
+        orderProviderStatuses(statuses, ['gemini', 'codex', 'claude']).map(s => `${s.key}:${s.workspace_id}`),
+        ['gemini:', 'codex:ws-1', 'codex:ws-2', 'claude:'],
+    );
+    assert.deepEqual(
+        orderProviderStatuses(statuses, []).map(s => `${s.key}:${s.workspace_id}`),
+        ['claude:', 'codex:ws-1', 'codex:ws-2', 'gemini:'],
+    );
+});
+
+test('meterFillColor returns palette RGBA tuples for ok, warning, critical, and muted states', () => {
+    assert.equal(meterFillColor('ok', true, false).length, 4);
+    assert.notDeepEqual(meterFillColor('ok', true, false), meterFillColor('warning', true, false));
+    assert.notDeepEqual(meterFillColor('warning', true, false), meterFillColor('critical', true, false));
+    assert.deepEqual(meterFillColor('ok', false, false), meterFillColor('critical', true, false));
+    assert.notDeepEqual(meterFillColor('ok', true, true), meterFillColor('ok', true, false));
+});
+
+test('circlePercentText clamps and rounds percentages for inside-ring display', () => {
+    assert.equal(circlePercentText(100), '100%');
+    assert.equal(circlePercentText(89.4), '89%');
+    assert.equal(circlePercentText(27.68), '28%');
+    assert.equal(circlePercentText(-5), '0%');
+    assert.equal(circlePercentText(120), '100%');
+});
+
+test('circleArcAngles decreases clockwise from 12 oclock as quota is consumed', () => {
+    assert.equal(circleArcAngles(0), null);
+    assert.deepEqual(circleArcAngles(100), {full: true, startAngle: 0, endAngle: 2 * Math.PI});
+
+    const arc90 = circleArcAngles(90);
+    const arc50 = circleArcAngles(50);
+    const arc28 = circleArcAngles(28);
+    assert.equal(arc90.full, false);
+    assert.equal(arc90.endAngle, 1.5 * Math.PI);
+    assert.equal(arc50.endAngle, 1.5 * Math.PI);
+    assert.equal(arc28.endAngle, 1.5 * Math.PI);
+    // As remaining quota drops from 90% -> 50% -> 28%, startAngle advances
+    // clockwise (increasing angle) toward 12 o'clock (1.5 * PI).
+    assert.ok(arc90.startAngle < arc50.startAngle);
+    assert.ok(arc50.startAngle < arc28.startAngle);
+    assert.ok(arc28.startAngle < arc28.endAngle);
+});
+
+test('paddingKeyForStyle, headerSpacingKeyForStyle, and spacingKeyForStyle keep separate keys for circle and bar', () => {
+    assert.equal(paddingKeyForStyle('circle'), 'circle-provider-padding');
+    assert.equal(paddingKeyForStyle('bar'), 'provider-padding');
+    assert.equal(headerSpacingKeyForStyle('circle'), 'circle-header-spacing');
+    assert.equal(headerSpacingKeyForStyle('bar'), 'header-spacing');
+    assert.equal(spacingKeyForStyle('circle'), 'circle-metric-spacing');
+    assert.equal(spacingKeyForStyle('bar'), 'metric-spacing');
+    assert.ok(schema.includes('name="circle-provider-padding"'));
+    assert.ok(schema.includes('name="header-spacing"'));
+    assert.ok(schema.includes('name="circle-header-spacing"'));
+    assert.ok(schema.includes('name="circle-metric-spacing"'));
+    assert.ok(schema.includes('name="circle-radius"'));
+    assert.ok(schema.includes('name="circle-columns"'));
+    assert.ok(schema.includes('name="provider-order"'));
+    assert.ok(schema.includes('name="provider-columns"'));
+    assert.ok(schema.includes('name="provider-column-spacing"'));
+    assert.ok(schema.includes('name="provider-column-breaks"'));
+    assert.ok(schema.includes('name="circle-text-position"'));
+});
+
+test('meter-style schema key defaults to circle and is wired into prefs and extension', () => {
+    const match = schema.match(/<key name="meter-style" type="s">([\s\S]*?)<\/key>/);
+    assert.ok(match, 'schema lacks meter-style');
+    assert.match(match[1], /<default>'circle'<\/default>/);
+    assert.match(prefsSource, /addMeterStyle\(popup, settings\)/);
+    assert.match(extensionSource, /get_string\('meter-style'\)/);
+    assert.ok(!extensionSource.includes("key === 'meter-style'"));
 });

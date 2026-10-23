@@ -15,6 +15,11 @@
       <default>['claude', 'codex', 'copilot', 'zai', 'gemini', 'go', 'zen', 'openrouter', 'deepseek', 'moonshot', 'colab']</default>
       <summary>Providers shown by the extension</summary>
     </key>
+    <key name="provider-order" type="as">
+      <default>[]</default>
+      <summary>Custom display order of providers in the popup</summary>
+      <description>An empty list preserves the order from config.toml or default provider list.</description>
+    </key>
     <key name="codex-workspaces" type="as">
       <default>[]</default>
       <summary>Codex workspaces shown by the extension</summary>
@@ -63,6 +68,11 @@
       <summary>Show user information in provider headers</summary>
       <description>Show the account name next to each provider plan in the popup. Turn off to show only the plan.</description>
     </key>
+    <key name="meter-style" type="s">
+      <default>'circle'</default>
+      <summary>Quota progress indicator style</summary>
+      <description>Render percentage quotas as compact circular gauges ('circle') or full-width horizontal bars ('bar').</description>
+    </key>
     <key name="browser-claude" type="s"><default>''</default><summary>Claude cookie browser</summary></key>
     <key name="browser-codex" type="s"><default>''</default><summary>Codex cookie browser</summary></key>
     <key name="browser-copilot" type="s"><default>''</default><summary>Copilot cookie browser</summary></key>
@@ -70,16 +80,65 @@
     <key name="provider-padding" type="i">
       <default>8</default>
       <range min="0" max="24"/>
-      <summary>Vertical padding around provider groups</summary>
+      <summary>Vertical padding around provider groups in bar mode</summary>
+    </key>
+    <key name="header-spacing" type="i">
+      <default>6</default>
+      <range min="0" max="24"/>
+      <summary>Spacing between provider header and quota bars</summary>
     </key>
     <key name="metric-spacing" type="i">
       <default>6</default>
       <range min="0" max="20"/>
-      <summary>Spacing between quota metrics</summary>
+      <summary>Spacing between quota metrics in bar mode</summary>
+    </key>
+    <key name="circle-provider-padding" type="i">
+      <default>10</default>
+      <range min="0" max="24"/>
+      <summary>Vertical padding around provider groups in circular mode</summary>
+    </key>
+    <key name="circle-header-spacing" type="i">
+      <default>10</default>
+      <range min="0" max="24"/>
+      <summary>Spacing between provider header and circular quota rows</summary>
+    </key>
+    <key name="circle-metric-spacing" type="i">
+      <default>8</default>
+      <range min="0" max="20"/>
+      <summary>Spacing between circular quota rows</summary>
+    </key>
+    <key name="circle-radius" type="i">
+      <default>16</default>
+      <range min="10" max="32"/>
+      <summary>Radius of circular quota gauges in pixels</summary>
+    </key>
+    <key name="circle-columns" type="i">
+      <default>3</default>
+      <range min="1" max="6"/>
+      <summary>Number of circular quota gauges per row</summary>
+    </key>
+    <key name="provider-columns" type="i">
+      <default>1</default>
+      <range min="1" max="4"/>
+      <summary>Number of provider columns shown side-by-side</summary>
+    </key>
+    <key name="provider-column-spacing" type="i">
+      <default>24</default>
+      <range min="0" max="64"/>
+      <summary>Horizontal spacing between provider columns in pixels</summary>
+    </key>
+    <key name="provider-column-breaks" type="as">
+      <default>[]</default>
+      <summary>Providers that start at the top of a new column</summary>
+    </key>
+    <key name="circle-text-position" type="s">
+      <default>'below'</default>
+      <summary>Position of label and reset text relative to circular gauges</summary>
+      <description>Place the window label and reset time centered below each circle ('below') or to its right ('right').</description>
     </key>
     <key name="popup-width" type="i">
       <default>360</default>
-      <range min="260" max="720"/>
+      <range min="50" max="720"/>
       <summary>Width of provider rows in the popup</summary>
     </key>
   </schema>

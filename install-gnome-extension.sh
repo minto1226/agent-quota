@@ -97,7 +97,7 @@ gnome-extensions pack -f \
     zip -q -ur "${bundle_dir}/agent-quota@torridfish.shell-extension.zip" \
         agent_quota.py common.py pyproject.toml README.md providers \
         workspace-selection.js reset-display.js secret-config.js provider-header.js \
-        gauge-symbolic.svg icons
+        meter-layout.js gauge-symbolic.svg icons
 )
 gnome-extensions install --force "${bundle_dir}/agent-quota@torridfish.shell-extension.zip"
 

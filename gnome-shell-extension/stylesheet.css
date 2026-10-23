@@ -120,6 +120,58 @@
     margin-left: 10px;
 }
 
+.agent-quota-circle-row {
+    spacing: 6px;
+}
+
+.agent-quota-circle-cell {
+    spacing: 5px;
+}
+
+.agent-quota-circle-cell.below {
+    spacing: 3px;
+}
+
+.agent-quota-circle-meter {
+    width: 32px;
+    height: 32px;
+}
+
+.agent-quota-circle-pct {
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 8.5px;
+    font-weight: bold;
+    text-align: center;
+}
+
+.agent-quota-circle-text {
+    padding-top: 1px;
+}
+
+.agent-quota-circle-text.below {
+    padding-top: 0;
+}
+
+.agent-quota-circle-label {
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 0.76em;
+}
+
+.agent-quota-circle-label.below {
+    text-align: center;
+}
+
+.agent-quota-circle-reset {
+    color: rgba(255, 255, 255, 0.48);
+    font-size: 0.7em;
+    margin-top: 1px;
+    margin-left: 0;
+}
+
+.agent-quota-circle-reset.below {
+    text-align: center;
+}
+
 .agent-quota-secondary {
     max-width: 360px;
 }

@@ -1,3 +1,4 @@
+import Cairo from 'cairo';
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -13,10 +14,24 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {filterCodexStatuses} from './workspace-selection.js';
 import {resetText, shouldShowReset} from './reset-display.js';
 import {providerHeader} from './provider-header.js';
+import {
+    chunkCircleMetrics,
+    chunkProviderColumns,
+    circleArcAngles,
+    circlePercentText,
+    headerSpacingKeyForStyle,
+    isPercentageMetric,
+    meterFillColor,
+    normalizeCircleTextPosition,
+    normalizeMeterStyle,
+    orderProviderStatuses,
+    paddingKeyForStyle,
+    spacingKeyForStyle,
+} from './meter-layout.js';
 
 const DEFAULT_REFRESH_SECONDS = 60;
 const COMMAND = 'agent-quota';
-const UI_REVISION = 'provider-settings-v13';
+const UI_REVISION = 'provider-settings-v16';
 const PROVIDER_KEYS = ['claude', 'codex', 'copilot', 'zai', 'gemini', 'go', 'zen', 'openrouter', 'deepseek', 'moonshot', 'colab'];
 // Providers whose cookie-auth backend still honours --browser.  OpenCode Go
 // migrated to the official API (opencode auth login) and ignores it.
@@ -213,6 +228,11 @@ class AgentQuotaIndicator extends PanelMenu.Button {
             const selected = new Set(this._settings.get_strv('providers'));
             statuses = statuses.filter(status => selected.has(status.key));
         }
+        const configuredOrder = this._settings.get_strv('provider-order');
+        statuses = orderProviderStatuses(
+            statuses,
+            configuredOrder.length ? configuredOrder : (overrideProviders ? this._settings.get_strv('providers') : []),
+        );
         statuses = filterCodexStatuses(
             statuses,
             this._settings.get_strv('codex-workspaces'),
@@ -237,79 +257,74 @@ class AgentQuotaIndicator extends PanelMenu.Button {
         }
 
         const showUserInfo = this._settings.get_boolean('show-user-info');
-        for (const status of statuses) {
+        const meterStyle = normalizeMeterStyle(this._settings.get_string('meter-style'));
+        const padding = this._settings.get_int(paddingKeyForStyle(meterStyle));
+        const headerSpacing = this._settings.get_int(headerSpacingKeyForStyle(meterStyle));
+        const spacing = this._settings.get_int(spacingKeyForStyle(meterStyle));
+        const circleRadius = this._settings.get_int('circle-radius');
+        const circleColumns = this._settings.get_int('circle-columns');
+        const circleTextPosition = normalizeCircleTextPosition(this._settings.get_string('circle-text-position'));
+        const providerColumns = this._settings.get_int('provider-columns');
+        const providerColumnSpacing = this._settings.get_int('provider-column-spacing');
+        const providerColumnBreaks = this._settings.get_strv('provider-column-breaks');
+        const popupWidth = this._settings.get_int('popup-width');
+        const columns = chunkProviderColumns(statuses, providerColumns, providerColumnBreaks);
+        if (columns.length <= 1) {
+            for (const status of statuses) {
+                const item = new PopupMenu.PopupBaseMenuItem({
+                    reactive: false,
+                    can_focus: false,
+                    style_class: 'agent-quota-provider-block',
+                });
+                item.style = `width: ${popupWidth}px; padding-top: ${padding}px; padding-bottom: ${padding}px;`;
+                item.add_child(this._buildProviderBox(
+                    status,
+                    showUserInfo,
+                    meterStyle,
+                    headerSpacing,
+                    spacing,
+                    circleRadius,
+                    circleColumns,
+                    circleTextPosition,
+                ));
+                this.menu.addMenuItem(item);
+            }
+        } else {
             const item = new PopupMenu.PopupBaseMenuItem({
                 reactive: false,
                 can_focus: false,
                 style_class: 'agent-quota-provider-block',
             });
-            const padding = this._settings.get_int('provider-padding');
-            const popupWidth = this._settings.get_int('popup-width');
-            item.style = `width: ${popupWidth}px; padding-top: ${padding}px; padding-bottom: ${padding}px;`;
-            const box = new St.BoxLayout({ vertical: true, x_expand: true });
-            const titleRow = new St.BoxLayout({x_expand: true});
-            const providerIcon = this._providerIcon(status.key);
-            if (providerIcon)
-                titleRow.add_child(providerIcon);
-            titleRow.add_child(new St.Label({
-                text: status.name,
-                style_class: status.state === 'ok' ? 'agent-quota-provider' : 'agent-quota-error',
+            item.style = 'padding-top: 0; padding-bottom: 0;';
+            const columnsRow = new St.BoxLayout({
                 x_expand: true,
-                y_align: Clutter.ActorAlign.CENTER,
-            }));
-            // Presentation only: hiding the user keeps the plan and never
-            // falls back to the source (which can name an account too).
-            const planOrSource = providerHeader(status, showUserInfo);
-            if (planOrSource)
-                titleRow.add_child(new St.Label({
-                    text: planOrSource,
-                    style_class: 'agent-quota-source',
-                    y_align: Clutter.ActorAlign.CENTER,
-                }));
-            box.add_child(titleRow);
-
-            if (status.state === 'ok') {
-                const metricsBox = new St.BoxLayout({
+                style_class: 'agent-quota-provider-columns',
+            });
+            columns.forEach((colStatuses, colIndex) => {
+                const colBox = new St.BoxLayout({
                     vertical: true,
                     x_expand: true,
-                    style_class: 'agent-quota-metrics',
+                    y_align: Clutter.ActorAlign.START,
+                    style_class: 'agent-quota-provider-column',
                 });
-                metricsBox.style = `margin-top: ${this._settings.get_int('metric-spacing')}px;`;
-                for (const metric of status.metrics ?? []) {
-                    const metricBlock = new St.BoxLayout({
-                        vertical: true,
-                        x_expand: true,
-                        style_class: 'agent-quota-metric-block',
-                    });
-                    metricBlock.style = `margin-top: ${this._settings.get_int('metric-spacing')}px;`;
-                    if (metric.pct !== null && metric.pct !== undefined)
-                        metricBlock.add_child(this._meter(metric.pct, metric.is_remaining, metric.muted));
-                    const metricRow = new St.BoxLayout({x_expand: true});
-                    metricRow.add_child(new St.Label({
-                        text: `${metric.label}: ${metric.value}`,
-                        style_class: 'agent-quota-metric',
-                        x_expand: true,
-                    }));
-                    if (shouldShowReset(this._prefs, metric, status.key))
-                        metricRow.add_child(new St.Label({
-                            text: resetText(this._prefs, metric, status.key),
-                            style_class: 'agent-quota-reset',
-                        }));
-                    metricBlock.add_child(metricRow);
-                    metricsBox.add_child(metricBlock);
+                colBox.style = `width: ${popupWidth}px;${colIndex > 0 ? ` margin-left: ${providerColumnSpacing}px;` : ''}`;
+                for (const status of colStatuses) {
+                    const providerBox = this._buildProviderBox(
+                        status,
+                        showUserInfo,
+                        meterStyle,
+                        headerSpacing,
+                        spacing,
+                        circleRadius,
+                        circleColumns,
+                        circleTextPosition,
+                    );
+                    providerBox.style = `padding-top: ${padding}px; padding-bottom: ${padding}px;`;
+                    colBox.add_child(providerBox);
                 }
-                box.add_child(metricsBox);
-            } else if (status.error) {
-                const errorLabel = new St.Label({
-                    text: this._shortError(status.error),
-                    style_class: 'agent-quota-secondary',
-                    x_expand: true,
-                });
-                errorLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-                errorLabel.clutter_text.single_line_mode = true;
-                box.add_child(errorLabel);
-            }
-            item.add_child(box);
+                columnsRow.add_child(colBox);
+            });
+            item.add_child(columnsRow);
             this.menu.addMenuItem(item);
         }
 
@@ -317,6 +332,51 @@ class AgentQuotaIndicator extends PanelMenu.Button {
 
         if (stderr)
             log(`agent-quota: ${stderr.trim()}`);
+    }
+
+    _buildProviderBox(status, showUserInfo, meterStyle, headerSpacing, spacing, circleRadius, circleColumns, circleTextPosition) {
+        const box = new St.BoxLayout({vertical: true, x_expand: true});
+        const titleRow = new St.BoxLayout({x_expand: true});
+        const providerIcon = this._providerIcon(status.key);
+        if (providerIcon)
+            titleRow.add_child(providerIcon);
+        const providerLabel = new St.Label({
+            text: status.name,
+            style_class: status.state === 'ok' ? 'agent-quota-provider' : 'agent-quota-error',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        providerLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+        providerLabel.clutter_text.single_line_mode = true;
+        titleRow.add_child(providerLabel);
+        // Presentation only: hiding the user keeps the plan and never
+        // falls back to the source (which can name an account too).
+        const planOrSource = providerHeader(status, showUserInfo);
+        if (planOrSource) {
+            const sourceLabel = new St.Label({
+                text: planOrSource,
+                style_class: 'agent-quota-source',
+                y_align: Clutter.ActorAlign.CENTER,
+            });
+            sourceLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+            sourceLabel.clutter_text.single_line_mode = true;
+            titleRow.add_child(sourceLabel);
+        }
+        box.add_child(titleRow);
+
+        if (status.state === 'ok') {
+            box.add_child(this._renderMetrics(status, meterStyle, headerSpacing, spacing, circleRadius, circleColumns, circleTextPosition));
+        } else if (status.error) {
+            const errorLabel = new St.Label({
+                text: this._shortError(status.error),
+                style_class: 'agent-quota-secondary',
+                x_expand: true,
+            });
+            errorLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+            errorLabel.clutter_text.single_line_mode = true;
+            box.add_child(errorLabel);
+        }
+        return box;
     }
 
     _appendSettingsAction() {
@@ -385,6 +445,118 @@ class AgentQuotaIndicator extends PanelMenu.Button {
         });
     }
 
+    _renderMetrics(status, meterStyle, headerSpacing, spacing, circleRadius, circleColumns, circleTextPosition) {
+        const metricsBox = new St.BoxLayout({
+            vertical: true,
+            x_expand: true,
+            style_class: 'agent-quota-metrics',
+        });
+        metricsBox.style = `margin-top: ${headerSpacing}px;`;
+
+        if (meterStyle === 'circle') {
+            const cols = Math.max(1, circleColumns || 3);
+            const rows = chunkCircleMetrics(status.metrics, cols);
+            rows.forEach((row, index) => {
+                const rowBox = new St.BoxLayout({
+                    x_expand: true,
+                    style_class: 'agent-quota-circle-row',
+                });
+                rowBox.layout_manager.homogeneous = true;
+                rowBox.style = `margin-top: ${index === 0 ? 0 : spacing}px;`;
+                for (let i = 0; i < cols; i++) {
+                    if (row[i])
+                        rowBox.add_child(this._circleMetricCell(row[i], status.key, circleRadius, circleTextPosition));
+                    else if (cols > 1)
+                        rowBox.add_child(new St.Widget({x_expand: true}));
+                }
+                metricsBox.add_child(rowBox);
+            });
+            const nonPct = (status.metrics ?? []).filter(item => !isPercentageMetric(item));
+            nonPct.forEach((metric, index) => {
+                metricsBox.add_child(this._barMetricBlock(metric, status.key, rows.length === 0 && index === 0 ? 0 : spacing));
+            });
+            return metricsBox;
+        }
+
+        (status.metrics ?? []).forEach((metric, index) => {
+            metricsBox.add_child(this._barMetricBlock(metric, status.key, index === 0 ? 0 : spacing));
+        });
+        return metricsBox;
+    }
+
+    _barMetricBlock(metric, providerKey, spacing) {
+        const metricBlock = new St.BoxLayout({
+            vertical: true,
+            x_expand: true,
+            style_class: 'agent-quota-metric-block',
+        });
+        metricBlock.style = `margin-top: ${spacing}px;`;
+        if (metric.pct !== null && metric.pct !== undefined)
+            metricBlock.add_child(this._meter(metric.pct, metric.is_remaining, metric.muted));
+        const metricRow = new St.BoxLayout({x_expand: true});
+        metricRow.add_child(new St.Label({
+            text: `${metric.label}: ${metric.value}`,
+            style_class: 'agent-quota-metric',
+            x_expand: true,
+        }));
+        if (shouldShowReset(this._prefs, metric, providerKey))
+            metricRow.add_child(new St.Label({
+                text: resetText(this._prefs, metric, providerKey),
+                style_class: 'agent-quota-reset',
+            }));
+        metricBlock.add_child(metricRow);
+        return metricBlock;
+    }
+
+    _circleMetricCell(metric, providerKey, circleRadius, circleTextPosition = 'below') {
+        const below = circleTextPosition !== 'right';
+        const cell = new St.BoxLayout({
+            vertical: below,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.START,
+            style_class: below ? 'agent-quota-circle-cell below' : 'agent-quota-circle-cell',
+        });
+        const ring = this._circleMeter(metric.pct, metric.is_remaining, metric.muted, circleRadius);
+        if (below)
+            ring.x_align = Clutter.ActorAlign.CENTER;
+        cell.add_child(ring);
+
+        const textCol = new St.BoxLayout({
+            vertical: true,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.START,
+            style_class: below ? 'agent-quota-circle-text below' : 'agent-quota-circle-text',
+        });
+        const label = new St.Label({
+            text: metric.label,
+            style_class: below
+                ? 'agent-quota-metric agent-quota-circle-label below'
+                : 'agent-quota-metric agent-quota-circle-label',
+            x_expand: true,
+            x_align: below ? Clutter.ActorAlign.CENTER : Clutter.ActorAlign.START,
+        });
+        label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+        label.clutter_text.single_line_mode = true;
+        textCol.add_child(label);
+
+        if (shouldShowReset(this._prefs, metric, providerKey)) {
+            const resetLabel = new St.Label({
+                text: resetText(this._prefs, metric, providerKey),
+                style_class: below
+                    ? 'agent-quota-reset agent-quota-circle-reset below'
+                    : 'agent-quota-reset agent-quota-circle-reset',
+                x_expand: true,
+                x_align: below ? Clutter.ActorAlign.CENTER : Clutter.ActorAlign.START,
+            });
+            resetLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+            resetLabel.clutter_text.single_line_mode = true;
+            textCol.add_child(resetLabel);
+        }
+
+        cell.add_child(textCol);
+        return cell;
+    }
+
     _meter(pct, isRemaining, muted = false) {
         const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
         const meter = new St.Widget({style_class: 'agent-quota-meter', x_expand: true});
@@ -398,6 +570,69 @@ class AgentQuotaIndicator extends PanelMenu.Button {
         };
         meter.connect('notify::allocation', updateFill);
         return meter;
+    }
+
+    _circleMeter(pct, isRemaining, muted = false, circleRadius = 16) {
+        const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
+        const state = this._meterState(clamped);
+        const [r, g, b, a] = meterFillColor(state, isRemaining, muted);
+        const radiusSetting = Math.max(10, Math.min(32, Number(circleRadius) || 16));
+        const size = radiusSetting * 2;
+        const strokeWidth = Math.max(2.2, Number((radiusSetting * 0.19).toFixed(1)));
+        const fontSize = Math.max(7, Number((radiusSetting * 0.53).toFixed(1)));
+        const container = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
+            style_class: 'agent-quota-circle-meter',
+            width: size,
+            height: size,
+            style: `width: ${size}px; height: ${size}px;`,
+            y_align: Clutter.ActorAlign.START,
+        });
+        const area = new St.DrawingArea({
+            width: size,
+            height: size,
+            x_expand: true,
+            y_expand: true,
+        });
+        area.connect('repaint', () => {
+            const cr = area.get_context();
+            const [w, h] = area.get_surface_size();
+            const cx = w / 2;
+            const cy = h / 2;
+            const radius = Math.max(1, (Math.min(w, h) - strokeWidth) / 2 - 0.5);
+
+            cr.setOperator(Cairo.Operator.CLEAR);
+            cr.paint();
+            cr.setOperator(Cairo.Operator.OVER);
+            cr.setLineWidth(strokeWidth);
+
+            cr.setSourceRGBA(1, 1, 1, 0.16);
+            cr.arc(cx, cy, radius, 0, 2 * Math.PI);
+            cr.stroke();
+
+            const arc = circleArcAngles(clamped, strokeWidth, radius);
+            if (arc) {
+                cr.setSourceRGBA(r, g, b, a);
+                if (!arc.full)
+                    cr.setLineCap(Cairo.LineCap.ROUND);
+                cr.arc(cx, cy, radius, arc.startAngle, arc.endAngle);
+                cr.stroke();
+            }
+
+            cr.$dispose();
+        });
+        const pctLabel = new St.Label({
+            text: circlePercentText(clamped),
+            style_class: 'agent-quota-circle-pct',
+            style: `font-size: ${fontSize}px;`,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+            x_expand: true,
+            y_expand: true,
+        });
+        container.add_child(area);
+        container.add_child(pctLabel);
+        return container;
     }
 
     _setIconState(state) {

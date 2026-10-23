@@ -7,6 +7,12 @@ import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/ex
 
 import {readAssignment, upsertAssignment} from './secret-config.js';
 import {selectionAfterWorkspaceToggle} from './workspace-selection.js';
+import {
+    headerSpacingKeyForStyle,
+    normalizeProviderOrder,
+    paddingKeyForStyle,
+    spacingKeyForStyle,
+} from './meter-layout.js';
 
 const PROVIDERS = [
     {id: 'claude', title: 'Claude', login: 'https://claude.ai/', browser: true},
@@ -22,6 +28,14 @@ const PROVIDERS = [
     {id: 'colab', title: 'Google Colab', command: 'colab usage'},
 ];
 const BROWSERS = ['', 'chrome', 'chromium', 'brave', 'edge', 'firefox', 'helium'];
+const METER_STYLES = [
+    {id: 'circle', title: 'Circular'},
+    {id: 'bar', title: 'Bar'},
+];
+const CIRCLE_TEXT_POSITIONS = [
+    {id: 'below', title: 'Below circle'},
+    {id: 'right', title: 'Right of circle'},
+];
 
 function addSwitch(group, settings, key, title, subtitle = '') {
     const row = new Adw.SwitchRow({title, subtitle});
@@ -39,6 +53,34 @@ function addSpin(group, settings, key, title, subtitle, lower, upper) {
     spin.set_value(settings.get_int(key));
     spin.connect('value-changed', () => settings.set_int(key, spin.get_value_as_int()));
     settings.connect(`changed::${key}`, () => spin.set_value(settings.get_int(key)));
+    row.add_suffix(spin);
+    row.activatable_widget = spin;
+    group.add(row);
+}
+
+function addStyleSpin(group, settings, keyForStyle, title, subtitle, lower, upper) {
+    const row = new Adw.ActionRow({title, subtitle});
+    const spin = new Gtk.SpinButton({
+        adjustment: new Gtk.Adjustment({lower, upper, step_increment: 1}),
+        valign: Gtk.Align.CENTER,
+        numeric: true,
+    });
+    let updating = false;
+    const activeKey = () => keyForStyle(settings.get_string('meter-style'));
+    const syncFromSettings = () => {
+        updating = true;
+        spin.set_value(settings.get_int(activeKey()));
+        updating = false;
+    };
+    syncFromSettings();
+    spin.connect('value-changed', () => {
+        if (updating)
+            return;
+        settings.set_int(activeKey(), spin.get_value_as_int());
+    });
+    for (const style of METER_STYLES)
+        settings.connect(`changed::${keyForStyle(style.id)}`, syncFromSettings);
+    settings.connect('changed::meter-style', syncFromSettings);
     row.add_suffix(spin);
     row.activatable_widget = spin;
     group.add(row);
@@ -97,6 +139,44 @@ function addBrowser(group, settings, provider) {
         settings.set_string(key, BROWSERS[row.selected]);
     });
     settings.connect(`changed::${key}`, setSelected);
+    group.add(row);
+}
+
+function addMeterStyle(group, settings) {
+    const row = new Adw.ComboRow({
+        title: 'Progress style',
+        subtitle: 'Compact circular gauges or full-width progress bars.',
+        model: Gtk.StringList.new(METER_STYLES.map(style => style.title)),
+    });
+    const setSelected = () => {
+        const index = METER_STYLES.findIndex(style => style.id === settings.get_string('meter-style'));
+        row.selected = index >= 0 ? index : 0;
+    };
+    setSelected();
+    row.connect('notify::selected', () => {
+        const style = METER_STYLES[row.selected] ?? METER_STYLES[0];
+        settings.set_string('meter-style', style.id);
+    });
+    settings.connect('changed::meter-style', setSelected);
+    group.add(row);
+}
+
+function addCircleTextPosition(group, settings) {
+    const row = new Adw.ComboRow({
+        title: 'Circle label position',
+        subtitle: 'Place window label and reset time below each circle or to its right.',
+        model: Gtk.StringList.new(CIRCLE_TEXT_POSITIONS.map(pos => pos.title)),
+    });
+    const setSelected = () => {
+        const index = CIRCLE_TEXT_POSITIONS.findIndex(pos => pos.id === settings.get_string('circle-text-position'));
+        row.selected = index >= 0 ? index : 0;
+    };
+    setSelected();
+    row.connect('notify::selected', () => {
+        const pos = CIRCLE_TEXT_POSITIONS[row.selected] ?? CIRCLE_TEXT_POSITIONS[0];
+        settings.set_string('circle-text-position', pos.id);
+    });
+    settings.connect('changed::circle-text-position', setSelected);
     group.add(row);
 }
 
@@ -241,6 +321,103 @@ function addSecretEditor(group, provider) {
     group.add(row);
 }
 
+function addProviderColumnBreakSwitch(group, settings, provider) {
+    const row = new Adw.SwitchRow({
+        title: 'Start a new column',
+        subtitle: 'Place this provider at the top of the next column in the popup.',
+        active: settings.get_strv('provider-column-breaks').includes(provider.id),
+    });
+    row.connect('notify::active', () => {
+        const selected = new Set(settings.get_strv('provider-column-breaks'));
+        row.active ? selected.add(provider.id) : selected.delete(provider.id);
+        settings.set_strv(
+            'provider-column-breaks',
+            PROVIDERS.map(p => p.id).filter(id => selected.has(id)),
+        );
+    });
+    settings.connect('changed::provider-column-breaks', () => {
+        row.active = settings.get_strv('provider-column-breaks').includes(provider.id);
+    });
+    group.add(row);
+}
+
+function addDisplayedProvidersGroup(page, settings) {
+    const providers = new Adw.PreferencesGroup({
+        title: 'Displayed providers',
+        description: 'Choose which providers appear in the popup and use the arrows to reorder them.',
+    });
+    const allIds = PROVIDERS.map(p => p.id);
+    const providerById = new Map(PROVIDERS.map(p => [p.id, p]));
+    let rows = [];
+    let updating = false;
+
+    const currentOrder = () => normalizeProviderOrder(settings.get_strv('provider-order'), allIds);
+
+    const rebuild = () => {
+        if (updating)
+            return;
+        updating = true;
+        for (const row of rows)
+            providers.remove(row);
+        rows = [];
+
+        const orderedIds = currentOrder();
+        const selected = new Set(settings.get_strv('providers'));
+
+        orderedIds.forEach((id, index) => {
+            const provider = providerById.get(id);
+            if (!provider)
+                return;
+            const row = new Adw.SwitchRow({
+                title: provider.title,
+                active: selected.has(id),
+            });
+            const upButton = new Gtk.Button({
+                icon_name: 'go-up-symbolic',
+                valign: Gtk.Align.CENTER,
+                tooltip_text: 'Move up',
+                sensitive: index > 0,
+                css_classes: ['flat'],
+            });
+            const downButton = new Gtk.Button({
+                icon_name: 'go-down-symbolic',
+                valign: Gtk.Align.CENTER,
+                tooltip_text: 'Move down',
+                sensitive: index < orderedIds.length - 1,
+                css_classes: ['flat'],
+            });
+            upButton.connect('clicked', () => {
+                const next = [...orderedIds];
+                [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                settings.set_strv('provider-order', next);
+            });
+            downButton.connect('clicked', () => {
+                const next = [...orderedIds];
+                [next[index + 1], next[index]] = [next[index], next[index + 1]];
+                settings.set_strv('provider-order', next);
+            });
+            row.add_suffix(upButton);
+            row.add_suffix(downButton);
+            row.connect('notify::active', () => {
+                if (updating)
+                    return;
+                const nextSelected = new Set(settings.get_strv('providers'));
+                row.active ? nextSelected.add(id) : nextSelected.delete(id);
+                settings.set_strv('providers', currentOrder().filter(key => nextSelected.has(key)));
+                settings.set_boolean('override-providers', true);
+            });
+            rows.push(row);
+            providers.add(row);
+        });
+        updating = false;
+    };
+
+    rebuild();
+    settings.connect('changed::providers', rebuild);
+    settings.connect('changed::provider-order', rebuild);
+    page.add(providers);
+}
+
 export default class AgentQuotaPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
@@ -254,23 +431,7 @@ export default class AgentQuotaPreferences extends ExtensionPreferences {
         addSpin(data, settings, 'refresh-seconds', 'Refresh interval', 'Seconds between quota fetches.', 10, 3600);
         general.add(data);
 
-        const providers = new Adw.PreferencesGroup({
-            title: 'Displayed providers',
-            description: 'Choose which providers appear in the popup. Changing one enables the config override.',
-        });
-        for (const provider of PROVIDERS) {
-            const row = new Adw.SwitchRow({title: provider.title});
-            row.active = settings.get_strv('providers').includes(provider.id);
-            row.connect('notify::active', () => {
-                const selected = new Set(settings.get_strv('providers'));
-                row.active ? selected.add(provider.id) : selected.delete(provider.id);
-                settings.set_strv('providers', PROVIDERS.map(p => p.id).filter(id => selected.has(id)));
-                settings.set_boolean('override-providers', true);
-            });
-            settings.connect('changed::providers', () => row.active = settings.get_strv('providers').includes(provider.id));
-            providers.add(row);
-        }
-        general.add(providers);
+        addDisplayedProvidersGroup(general, settings);
         window.add(general);
 
         const appearance = new Adw.PreferencesPage({title: 'Appearance', icon_name: 'applications-graphics-symbolic'});
@@ -279,11 +440,18 @@ export default class AgentQuotaPreferences extends ExtensionPreferences {
         addSpin(colors, settings, 'critical-threshold', 'Critical threshold', 'Remaining percentage at or below which meters turn red.', 0, 98);
         appearance.add(colors);
         const popup = new Adw.PreferencesGroup({title: 'Popup'});
+        addMeterStyle(popup, settings);
+        addCircleTextPosition(popup, settings);
         addSwitch(popup, settings, 'show-settings-action', 'Show Settings action at the bottom of the popup');
         addSwitch(popup, settings, 'show-user-info', 'Show user information', 'Show the account name next to each provider plan. Turn off to show only the plan.');
-        addSpin(popup, settings, 'provider-padding', 'Provider group padding', 'Vertical padding around each provider.', 0, 24);
-        addSpin(popup, settings, 'metric-spacing', 'Metric spacing', 'Vertical spacing between quota rows.', 0, 20);
-        addSpin(popup, settings, 'popup-width', 'Popup width', 'Wider values create more space between provider and account information.', 260, 720);
+        addStyleSpin(popup, settings, paddingKeyForStyle, 'Provider group padding', 'Vertical padding around each provider (saved separately for Circular and Bar).', 0, 24);
+        addStyleSpin(popup, settings, headerSpacingKeyForStyle, 'Header to meter spacing', 'Vertical distance from the provider title to its quota meters (saved separately for Circular and Bar).', 0, 24);
+        addStyleSpin(popup, settings, spacingKeyForStyle, 'Metric spacing', 'Vertical spacing between quota rows (saved separately for Circular and Bar).', 0, 20);
+        addSpin(popup, settings, 'circle-radius', 'Circle radius', 'Radius of circular progress gauges in pixels.', 10, 32);
+        addSpin(popup, settings, 'circle-columns', 'Circles per row', 'Number of circular gauges shown in each row.', 1, 6);
+        addSpin(popup, settings, 'provider-columns', 'Provider columns', 'Number of provider columns shown side-by-side in the popup.', 1, 4);
+        addSpin(popup, settings, 'provider-column-spacing', 'Provider column spacing', 'Horizontal spacing between side-by-side provider columns in pixels.', 0, 64);
+        addSpin(popup, settings, 'popup-width', 'Popup width', 'Width of each provider column in pixels.', 50, 720);
         appearance.add(popup);
         window.add(appearance);
 
@@ -307,6 +475,7 @@ export default class AgentQuotaPreferences extends ExtensionPreferences {
             if (provider.secret)
                 addSecretEditor(group, provider);
             addSwitch(group, settings, `show-reset-when-full-${provider.id}`, 'Show reset time when full');
+            addProviderColumnBreakSwitch(group, settings, provider);
             providerSettings.add(group);
         }
         window.add(providerSettings);
