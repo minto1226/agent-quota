@@ -24,3 +24,25 @@ export function resetText(prefs, metric, provider) {
         return 'No reset scheduled';
     return '—';
 }
+
+// Widget layout uses one global reset rule instead of per-provider switches.
+export function shouldShowResetGlobal(prefs, metric) {
+    if (metric.pct !== null && metric.pct !== undefined && metric.pct >= 99.95)
+        return prefs.getBoolean('show-reset-when-full-global');
+    return metric.reset !== '—';
+}
+
+export function resetTextGlobal(prefs, metric) {
+    const text = String(metric.reset ?? '').trim();
+    if (text && text !== '—') {
+        // Some providers write a sentence such as "No reset planned" here;
+        // a single dash is enough in the compact widget layout.
+        if (/^no reset\b/i.test(text))
+            return '-';
+        return metric.reset;
+    }
+    if (metric.pct !== null && metric.pct !== undefined &&
+        metric.pct >= 99.95 && prefs.getBoolean('show-reset-when-full-global'))
+        return '-';
+    return '—';
+}

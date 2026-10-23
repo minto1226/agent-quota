@@ -12,18 +12,29 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import {filterCodexStatuses} from './workspace-selection.js';
-import {resetText, shouldShowReset} from './reset-display.js';
-import {providerHeader} from './provider-header.js';
 import {
+    resetText,
+    resetTextGlobal,
+    shouldShowReset,
+    shouldShowResetGlobal,
+} from './reset-display.js';
+import {providerPlan, providerUser} from './provider-header.js';
+import {layoutGrid, parseLayout} from './layout-model.js';
+import {
+    autoProviderColumns,
     chunkCircleMetrics,
     chunkProviderColumns,
-    circleArcAngles,
     circlePercentText,
+    displayMetricValue,
+    filterVisibleMetrics,
+    gaugeArcAngles,
+    GAUGE_END_ANGLE,
+    GAUGE_START_ANGLE,
     headerSpacingKeyForStyle,
     isPercentageMetric,
     meterFillColor,
     normalizeCircleTextPosition,
-    normalizeMeterStyle,
+    normalizeGaugePercentMode,
     orderProviderStatuses,
     paddingKeyForStyle,
     spacingKeyForStyle,
@@ -31,7 +42,7 @@ import {
 
 const DEFAULT_REFRESH_SECONDS = 60;
 const COMMAND = 'agent-quota';
-const UI_REVISION = 'provider-settings-v16';
+const UI_REVISION = 'provider-widget-v34';
 const PROVIDER_KEYS = ['claude', 'codex', 'copilot', 'zai', 'gemini', 'go', 'zen', 'openrouter', 'deepseek', 'moonshot', 'colab'];
 // Providers whose cookie-auth backend still honours --browser.  OpenCode Go
 // migrated to the official API (opencode auth login) and ignores it.
@@ -83,7 +94,7 @@ class AgentQuotaIndicator extends PanelMenu.Button {
             getBoolean: key => this._settings.get_boolean(key),
         };
         this._settingsSignal = this._settings.connect('changed', (_settings, key) => {
-            if (key === 'codex-workspace-options')
+            if (key === 'codex-workspace-options' || key === 'metric-options')
                 return;
             if (key === 'refresh-seconds') {
                 this._scheduleRefresh();
@@ -237,6 +248,11 @@ class AgentQuotaIndicator extends PanelMenu.Button {
             statuses,
             this._settings.get_strv('codex-workspaces'),
         );
+        this._rememberMetricOptions(statuses);
+        statuses = filterVisibleMetrics(
+            statuses,
+            this._settings.get_strv('hidden-metrics'),
+        );
         const failed = statuses.filter(status => status.state !== 'ok');
         const metrics = statuses.flatMap(status => status.metrics ?? [])
             .filter(metric => metric.pct !== null && metric.pct !== undefined && !metric.muted);
@@ -257,18 +273,56 @@ class AgentQuotaIndicator extends PanelMenu.Button {
         }
 
         const showUserInfo = this._settings.get_boolean('show-user-info');
-        const meterStyle = normalizeMeterStyle(this._settings.get_string('meter-style'));
+        const showOrgName = this._settings.get_boolean('show-org-name');
+        // Bar mode was removed; the hidden classic fallback stays gauge-only.
+        const meterStyle = 'circle';
         const padding = this._settings.get_int(paddingKeyForStyle(meterStyle));
         const headerSpacing = this._settings.get_int(headerSpacingKeyForStyle(meterStyle));
         const spacing = this._settings.get_int(spacingKeyForStyle(meterStyle));
         const circleRadius = this._settings.get_int('circle-radius');
         const circleColumns = this._settings.get_int('circle-columns');
         const circleTextPosition = normalizeCircleTextPosition(this._settings.get_string('circle-text-position'));
+        const gaugePercentMode = normalizeGaugePercentMode(this._settings.get_string('gauge-percent'));
         const providerColumns = this._settings.get_int('provider-columns');
         const providerColumnSpacing = this._settings.get_int('provider-column-spacing');
         const providerColumnBreaks = this._settings.get_strv('provider-column-breaks');
+        const providerLayout = this._settings.get_string('provider-layout');
         const popupWidth = this._settings.get_int('popup-width');
-        const columns = chunkProviderColumns(statuses, providerColumns, providerColumnBreaks);
+        const layoutOptions = {
+            meterStyle,
+            circleColumns,
+            circleRadius,
+            circleTextPosition,
+            padding,
+            headerSpacing,
+            spacing,
+            popupWidth,
+            columnSpacing: providerColumnSpacing,
+        };
+        // The widget layout is the only popup layout.  Classic provider
+        // columns remain as a silent emergency fallback if rendering throws.
+        if (statuses.every(status => status.state === 'ok')) {
+            try {
+                this._renderWidgetPopup(statuses, {
+                    showUserInfo,
+                    showOrgName,
+                    spacing,
+                    circleRadius,
+                    gaugePercentMode,
+                });
+                this._appendSettingsAction();
+                return;
+            } catch (error) {
+                // Never let a widget-layout regression take the whole popup
+                // down; the classic columns are still a complete fallback.
+                logError(error, 'agent-quota: widget layout failed');
+                this.menu.removeAll();
+            }
+        }
+
+        const columns = providerLayout === 'auto'
+            ? autoProviderColumns(statuses, providerColumns, layoutOptions)
+            : chunkProviderColumns(statuses, providerColumns, providerColumnBreaks);
         if (columns.length <= 1) {
             for (const status of statuses) {
                 const item = new PopupMenu.PopupBaseMenuItem({
@@ -286,6 +340,8 @@ class AgentQuotaIndicator extends PanelMenu.Button {
                     circleRadius,
                     circleColumns,
                     circleTextPosition,
+                    showOrgName,
+                    gaugePercentMode,
                 ));
                 this.menu.addMenuItem(item);
             }
@@ -318,6 +374,8 @@ class AgentQuotaIndicator extends PanelMenu.Button {
                         circleRadius,
                         circleColumns,
                         circleTextPosition,
+                        showOrgName,
+                        gaugePercentMode,
                     );
                     providerBox.style = `padding-top: ${padding}px; padding-bottom: ${padding}px;`;
                     colBox.add_child(providerBox);
@@ -334,38 +392,51 @@ class AgentQuotaIndicator extends PanelMenu.Button {
             log(`agent-quota: ${stderr.trim()}`);
     }
 
-    _buildProviderBox(status, showUserInfo, meterStyle, headerSpacing, spacing, circleRadius, circleColumns, circleTextPosition) {
-        const box = new St.BoxLayout({vertical: true, x_expand: true});
+    _providerHeader(status, showUserInfo, showOrgName, pullLeft = false) {
         const titleRow = new St.BoxLayout({x_expand: true});
+        if (pullLeft) {
+            // Pull the icon + plan line toward the popup edge without moving
+            // the gauge grid.
+            titleRow.translation_x = -6;
+        }
         const providerIcon = this._providerIcon(status.key);
         if (providerIcon)
             titleRow.add_child(providerIcon);
+        // The icon already identifies the provider, so the plan takes the
+        // provider name's bold slot and the name is no longer shown.
         const providerLabel = new St.Label({
-            text: status.name,
+            text: providerPlan(status, showOrgName),
             style_class: status.state === 'ok' ? 'agent-quota-provider' : 'agent-quota-error',
             x_expand: true,
+            y_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
         providerLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
         providerLabel.clutter_text.single_line_mode = true;
         titleRow.add_child(providerLabel);
-        // Presentation only: hiding the user keeps the plan and never
-        // falls back to the source (which can name an account too).
-        const planOrSource = providerHeader(status, showUserInfo);
-        if (planOrSource) {
+        // Presentation only: the user stays on the right and is dropped
+        // entirely when the switch is off.
+        const userText = providerUser(status, showUserInfo);
+        if (userText) {
             const sourceLabel = new St.Label({
-                text: planOrSource,
+                text: userText,
                 style_class: 'agent-quota-source',
+                y_expand: true,
                 y_align: Clutter.ActorAlign.CENTER,
             });
             sourceLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
             sourceLabel.clutter_text.single_line_mode = true;
             titleRow.add_child(sourceLabel);
         }
-        box.add_child(titleRow);
+        return titleRow;
+    }
+
+    _buildProviderBox(status, showUserInfo, meterStyle, headerSpacing, spacing, circleRadius, circleColumns, circleTextPosition, showOrgName, gaugePercentMode) {
+        const box = new St.BoxLayout({vertical: true, x_expand: true});
+        box.add_child(this._providerHeader(status, showUserInfo, showOrgName, true));
 
         if (status.state === 'ok') {
-            box.add_child(this._renderMetrics(status, meterStyle, headerSpacing, spacing, circleRadius, circleColumns, circleTextPosition));
+            box.add_child(this._renderMetrics(status, meterStyle, headerSpacing, spacing, circleRadius, circleColumns, circleTextPosition, gaugePercentMode));
         } else if (status.error) {
             const errorLabel = new St.Label({
                 text: this._shortError(status.error),
@@ -379,6 +450,137 @@ class AgentQuotaIndicator extends PanelMenu.Button {
         return box;
     }
 
+    _widgetCellHeight(statuses, spacing, radius, gaugePercentMode) {
+        const r = Math.max(10, Math.min(32, Number(radius) || 16));
+        const strokeWidth = Math.max(2.2, Number((r * 0.19).toFixed(1)));
+        const configuredFontSize = this._settings.get_int('gauge-percent-font-size');
+        const fontSize = configuredFontSize > 0
+            ? configuredFontSize
+            : Math.max(7, Number((r * 0.53).toFixed(1)));
+        const offsetPx = r * this._settings.get_int('gauge-percent-offset') / 100;
+        const labelFontSize = this._settings.get_int('gauge-label-font-size');
+        const resetFontSize = this._settings.get_int('gauge-reset-font-size');
+        const centerY = r + strokeWidth / 2;
+        const gaugeHeight = Math.ceil(Math.max(
+            centerY + r * Math.sin(Math.PI / 6) + strokeWidth / 2,
+            centerY + offsetPx + fontSize * 0.65,
+        ));
+        let hasReset = false;
+        for (const status of statuses) {
+            for (const metric of status.metrics ?? []) {
+                if (shouldShowResetGlobal(this._prefs, metric)) {
+                    hasReset = true;
+                    break;
+                }
+            }
+            if (hasReset)
+                break;
+        }
+        return Math.ceil(gaugeHeight + spacing + labelFontSize * 1.3
+            + (hasReset ? resetFontSize * 1.3 + 2 : 0) + 4);
+    }
+
+    _renderWidgetPopup(statuses, options) {
+        const {showUserInfo, showOrgName, spacing, circleRadius,
+            gaugePercentMode} = options;
+        const metricsByProvider = new Map();
+        for (const status of statuses) {
+            metricsByProvider.set(
+                status.key,
+                (status.metrics ?? []).map(metric => metric.label).filter(Boolean),
+            );
+        }
+        const columns = this._settings.get_int('layout-columns');
+        const gaugeSpacing = this._settings.get_int('layout-gauge-spacing');
+        const cardGap = this._settings.get_int('layout-gap');
+        const layout = parseLayout(
+            this._settings.get_string('popup-layout'),
+            statuses.map(status => status.key),
+            metricsByProvider,
+            {columns, gaugeColumns: columns},
+        );
+        const padding = this._settings.get_int('layout-padding');
+        const cellWidth = Math.max(56, Math.ceil(2 * circleRadius + 24)) + 2 * padding;
+        const headerHeight = 24 + 2 * padding;
+        const cellHeight = this._widgetCellHeight(
+            statuses,
+            spacing,
+            circleRadius,
+            gaugePercentMode,
+        ) + 2 * padding;
+        const grid = layoutGrid(layout, metricsByProvider, {
+            cellWidth,
+            columnGap: gaugeSpacing,
+            rowGap: gaugeSpacing,
+            headerHeight,
+            cellHeight,
+            padding,
+            cardGap,
+        });
+        const container = new St.Widget({
+            layout_manager: new Clutter.FixedLayout(),
+            width: grid.width,
+            height: grid.height,
+            style_class: 'agent-quota-widget-grid',
+        });
+        const statusById = new Map(statuses.map(status => [status.key, status]));
+
+        for (const provider of grid.providers) {
+            const status = statusById.get(provider.id);
+            if (!status)
+                continue;
+            // The card is only the background: headers and gauges are placed
+            // directly on the global grid so every card shares the same tracks.
+            const card = new St.Widget({
+                style_class: 'agent-quota-widget-card',
+                x: provider.card.x,
+                y: provider.card.y,
+                width: provider.card.width,
+                height: provider.card.height,
+                reactive: false,
+            });
+            container.add_child(card);
+
+            const header = this._providerHeader(status, showUserInfo, showOrgName);
+            header.x = provider.header.x;
+            header.y = provider.header.y;
+            header.width = provider.header.width;
+            header.height = provider.header.height;
+            container.add_child(header);
+
+            for (const gauge of provider.gauges) {
+                const metric = (status.metrics ?? []).find(item => item.label === gauge.label);
+                if (!metric)
+                    continue;
+                const cell = isPercentageMetric(metric)
+                    ? this._circleMetricCell(
+                        metric,
+                        status.key,
+                        circleRadius,
+                        'below',
+                        spacing,
+                        gaugePercentMode,
+                        true,
+                    )
+                    : this._barMetricBlock(metric, status.key, 0, true);
+                cell.x = gauge.x;
+                cell.y = gauge.y;
+                cell.width = gauge.width;
+                cell.height = gauge.height;
+                container.add_child(cell);
+            }
+        }
+
+        const item = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+            style_class: 'agent-quota-widget-menu-item',
+        });
+        item.style = `width: ${grid.width}px; padding: 0;`;
+        item.add_child(container);
+        this.menu.addMenuItem(item);
+    }
+
     _appendSettingsAction() {
         if (!this._settings.get_boolean('show-settings-action'))
             return;
@@ -386,6 +588,20 @@ class AgentQuotaIndicator extends PanelMenu.Button {
         const settingsItem = new PopupMenu.PopupImageMenuItem('Settings', 'emblem-system-symbolic');
         settingsItem.connect('activate', () => this._openPreferences());
         this.menu.addMenuItem(settingsItem);
+    }
+
+    _rememberMetricOptions(statuses) {
+        const options = [];
+        for (const status of statuses) {
+            for (const metric of status.metrics ?? []) {
+                if (metric.label)
+                    options.push(`${status.key}:${metric.label}`);
+            }
+        }
+        const unique = [...new Set(options)];
+        const current = this._settings.get_strv('metric-options');
+        if (current.length !== unique.length || current.some((value, index) => value !== unique[index]))
+            this._settings.set_strv('metric-options', unique);
     }
 
     _rememberCodexWorkspaces(statuses) {
@@ -438,14 +654,28 @@ class AgentQuotaIndicator extends PanelMenu.Button {
             .get_child(`provider-${provider}-symbolic.svg`);
         if (!file.query_exists(null))
             return null;
-        return new St.Icon({
-            gicon: Gio.FileIcon.new(file),
-            style_class: 'agent-quota-provider-icon',
+        // A fixed box keeps every provider icon on the same pixel footprint;
+        // the SVGs are normalized so their visible artwork matches too.
+        const box = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
+            style_class: 'agent-quota-provider-icon-box',
+            width: 18,
+            height: 18,
+            x_expand: false,
+            y_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
+        box.add_child(new St.Icon({
+            gicon: Gio.FileIcon.new(file),
+            icon_size: 18,
+            style_class: 'agent-quota-provider-icon',
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
+        return box;
     }
 
-    _renderMetrics(status, meterStyle, headerSpacing, spacing, circleRadius, circleColumns, circleTextPosition) {
+    _renderMetrics(status, meterStyle, headerSpacing, spacing, circleRadius, circleColumns, circleTextPosition, gaugePercentMode) {
         const metricsBox = new St.BoxLayout({
             vertical: true,
             x_expand: true,
@@ -456,16 +686,20 @@ class AgentQuotaIndicator extends PanelMenu.Button {
         if (meterStyle === 'circle') {
             const cols = Math.max(1, circleColumns || 3);
             const rows = chunkCircleMetrics(status.metrics, cols);
+            const groupPadding = this._settings.get_int(paddingKeyForStyle(meterStyle));
             rows.forEach((row, index) => {
                 const rowBox = new St.BoxLayout({
                     x_expand: true,
                     style_class: 'agent-quota-circle-row',
                 });
                 rowBox.layout_manager.homogeneous = true;
-                rowBox.style = `margin-top: ${index === 0 ? 0 : spacing}px;`;
+                // Keep every gauge row on the same pitch as the first row
+                // (provider header + spacing + group padding + gauge), so
+                // gauge rows line up across independent provider columns.
+                rowBox.style = `margin-top: ${index === 0 ? 0 : 22 + headerSpacing + 2 * groupPadding}px;`;
                 for (let i = 0; i < cols; i++) {
                     if (row[i])
-                        rowBox.add_child(this._circleMetricCell(row[i], status.key, circleRadius, circleTextPosition));
+                        rowBox.add_child(this._circleMetricCell(row[i], status.key, circleRadius, circleTextPosition, spacing, gaugePercentMode));
                     else if (cols > 1)
                         rowBox.add_child(new St.Widget({x_expand: true}));
                 }
@@ -484,7 +718,7 @@ class AgentQuotaIndicator extends PanelMenu.Button {
         return metricsBox;
     }
 
-    _barMetricBlock(metric, providerKey, spacing) {
+    _barMetricBlock(metric, providerKey, spacing, useGlobalReset = false) {
         const metricBlock = new St.BoxLayout({
             vertical: true,
             x_expand: true,
@@ -492,31 +726,44 @@ class AgentQuotaIndicator extends PanelMenu.Button {
         });
         metricBlock.style = `margin-top: ${spacing}px;`;
         if (metric.pct !== null && metric.pct !== undefined)
-            metricBlock.add_child(this._meter(metric.pct, metric.is_remaining, metric.muted));
+            metricBlock.add_child(this._meter(metric.pct, metric.is_remaining, metric.muted, metric.insufficient));
         const metricRow = new St.BoxLayout({x_expand: true});
-        metricRow.add_child(new St.Label({
-            text: `${metric.label}: ${metric.value}`,
-            style_class: 'agent-quota-metric',
+        const metricLabel = new St.Label({
+            text: `${metric.label}: ${displayMetricValue(metric)}`,
+            style_class: metric.insufficient ? 'agent-quota-metric agent-quota-insufficient' : 'agent-quota-metric',
             x_expand: true,
-        }));
-        if (shouldShowReset(this._prefs, metric, providerKey))
+        });
+        metricLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+        metricLabel.clutter_text.single_line_mode = true;
+        metricRow.add_child(metricLabel);
+        const showReset = useGlobalReset
+            ? shouldShowResetGlobal(this._prefs, metric)
+            : shouldShowReset(this._prefs, metric, providerKey);
+        if (showReset)
             metricRow.add_child(new St.Label({
-                text: resetText(this._prefs, metric, providerKey),
+                text: useGlobalReset
+                    ? resetTextGlobal(this._prefs, metric)
+                    : resetText(this._prefs, metric, providerKey),
                 style_class: 'agent-quota-reset',
             }));
         metricBlock.add_child(metricRow);
         return metricBlock;
     }
 
-    _circleMetricCell(metric, providerKey, circleRadius, circleTextPosition = 'below') {
+    _circleMetricCell(metric, providerKey, circleRadius, circleTextPosition = 'below', spacing = 0, gaugePercentMode = 'percent', useGlobalReset = false) {
         const below = circleTextPosition !== 'right';
+        const labelFontSize = this._settings.get_int('gauge-label-font-size');
+        const resetFontSize = this._settings.get_int('gauge-reset-font-size');
         const cell = new St.BoxLayout({
             vertical: below,
             x_expand: true,
             y_align: Clutter.ActorAlign.START,
             style_class: below ? 'agent-quota-circle-cell below' : 'agent-quota-circle-cell',
         });
-        const ring = this._circleMeter(metric.pct, metric.is_remaining, metric.muted, circleRadius);
+        // The gauge-to-label gap follows the metric spacing setting instead of
+        // the fixed CSS value.
+        cell.style = `spacing: ${spacing}px;`;
+        const ring = this._circleMeter(metric.pct, metric.is_remaining, metric.muted, circleRadius, metric.insufficient, gaugePercentMode);
         if (below)
             ring.x_align = Clutter.ActorAlign.CENTER;
         cell.add_child(ring);
@@ -524,14 +771,20 @@ class AgentQuotaIndicator extends PanelMenu.Button {
         const textCol = new St.BoxLayout({
             vertical: true,
             x_expand: true,
+            x_align: below ? Clutter.ActorAlign.CENTER : Clutter.ActorAlign.START,
             y_align: Clutter.ActorAlign.START,
             style_class: below ? 'agent-quota-circle-text below' : 'agent-quota-circle-text',
         });
         const label = new St.Label({
             text: metric.label,
-            style_class: below
-                ? 'agent-quota-metric agent-quota-circle-label below'
-                : 'agent-quota-metric agent-quota-circle-label',
+            style_class: metric.insufficient
+                ? (below
+                    ? 'agent-quota-metric agent-quota-circle-label below agent-quota-insufficient'
+                    : 'agent-quota-metric agent-quota-circle-label agent-quota-insufficient')
+                : (below
+                    ? 'agent-quota-metric agent-quota-circle-label below'
+                    : 'agent-quota-metric agent-quota-circle-label'),
+            style: `font-size: ${labelFontSize}px;`,
             x_expand: true,
             x_align: below ? Clutter.ActorAlign.CENTER : Clutter.ActorAlign.START,
         });
@@ -539,12 +792,18 @@ class AgentQuotaIndicator extends PanelMenu.Button {
         label.clutter_text.single_line_mode = true;
         textCol.add_child(label);
 
-        if (shouldShowReset(this._prefs, metric, providerKey)) {
+        const showReset = useGlobalReset
+            ? shouldShowResetGlobal(this._prefs, metric)
+            : shouldShowReset(this._prefs, metric, providerKey);
+        if (showReset) {
             const resetLabel = new St.Label({
-                text: resetText(this._prefs, metric, providerKey),
+                text: useGlobalReset
+                    ? resetTextGlobal(this._prefs, metric)
+                    : resetText(this._prefs, metric, providerKey),
                 style_class: below
                     ? 'agent-quota-reset agent-quota-circle-reset below'
                     : 'agent-quota-reset agent-quota-circle-reset',
+                style: `font-size: ${resetFontSize}px;`,
                 x_expand: true,
                 x_align: below ? Clutter.ActorAlign.CENTER : Clutter.ActorAlign.START,
             });
@@ -557,81 +816,108 @@ class AgentQuotaIndicator extends PanelMenu.Button {
         return cell;
     }
 
-    _meter(pct, isRemaining, muted = false) {
+    _meter(pct, isRemaining, muted = false, insufficient = false) {
         const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
+        // Match the floored percentage text so the bar never reads higher.
+        const displayPct = Math.floor(clamped);
         const meter = new St.Widget({style_class: 'agent-quota-meter', x_expand: true});
         const fill = new St.Widget({
-            style_class: `agent-quota-meter-fill ${isRemaining ? 'remaining' : 'used'} ${muted ? 'muted' : this._meterState(clamped)}`,
+            style_class: `agent-quota-meter-fill ${isRemaining ? 'remaining' : 'used'} ${insufficient ? 'insufficient' : muted ? 'muted' : this._meterState(displayPct)}`,
         });
         meter.add_child(fill);
         const updateFill = () => {
             if (meter.width > 0)
-                fill.width = Math.round(meter.width * clamped / 100);
+                fill.width = Math.round(meter.width * displayPct / 100);
         };
         meter.connect('notify::allocation', updateFill);
         return meter;
     }
 
-    _circleMeter(pct, isRemaining, muted = false, circleRadius = 16) {
+    _circleMeter(pct, isRemaining, muted = false, circleRadius = 16, insufficient = false, gaugePercentMode = 'percent') {
         const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
-        const state = this._meterState(clamped);
-        const [r, g, b, a] = meterFillColor(state, isRemaining, muted);
+        // The arc and its number use the same floored value.
+        const displayPct = Math.floor(clamped);
+        const state = this._meterState(displayPct);
+        const [r, g, b, a] = meterFillColor(state, isRemaining, muted, insufficient);
         const radiusSetting = Math.max(10, Math.min(32, Number(circleRadius) || 16));
-        const size = radiusSetting * 2;
+        const width = radiusSetting * 2;
         const strokeWidth = Math.max(2.2, Number((radiusSetting * 0.19).toFixed(1)));
-        const fontSize = Math.max(7, Number((radiusSetting * 0.53).toFixed(1)));
+        const configuredFontSize = this._settings.get_int('gauge-percent-font-size');
+        const fontSize = configuredFontSize > 0
+            ? configuredFontSize
+            : Math.max(7, Number((radiusSetting * 0.53).toFixed(1)));
+        const percentText = circlePercentText(clamped, gaugePercentMode);
+        const offsetPx = radiusSetting * this._settings.get_int('gauge-percent-offset') / 100;
+        // The gauge container only needs to be as tall as the visible content:
+        // the arc endpoints or the percentage text, whichever reaches lower.
+        const centerY = radiusSetting + strokeWidth / 2;
+        const arcBottom = centerY + radiusSetting * Math.sin(Math.PI / 6) + strokeWidth / 2;
+        const textBottom = percentText
+            ? centerY + offsetPx + fontSize * 0.65
+            : 0;
+        const gaugeHeight = Math.ceil(Math.max(arcBottom, textBottom));
         const container = new St.Widget({
             layout_manager: new Clutter.BinLayout(),
             style_class: 'agent-quota-circle-meter',
-            width: size,
-            height: size,
-            style: `width: ${size}px; height: ${size}px;`,
+            width,
+            height: gaugeHeight,
+            style: `width: ${width}px; height: ${gaugeHeight}px;`,
             y_align: Clutter.ActorAlign.START,
         });
         const area = new St.DrawingArea({
-            width: size,
-            height: size,
+            width,
+            height: gaugeHeight,
             x_expand: true,
             y_expand: true,
         });
         area.connect('repaint', () => {
             const cr = area.get_context();
-            const [w, h] = area.get_surface_size();
+            const [w] = area.get_surface_size();
             const cx = w / 2;
-            const cy = h / 2;
-            const radius = Math.max(1, (Math.min(w, h) - strokeWidth) / 2 - 0.5);
+            const cy = centerY;
+            const radius = Math.max(1, (w - strokeWidth) / 2 - 0.5);
 
             cr.setOperator(Cairo.Operator.CLEAR);
             cr.paint();
             cr.setOperator(Cairo.Operator.OVER);
             cr.setLineWidth(strokeWidth);
+            // Flat ends keep the gap edges clean; no rounded needle-like cap.
+            cr.setLineCap(Cairo.LineCap.BUTT);
 
+            // The opening never moves: only the green remainder shrinks.
             cr.setSourceRGBA(1, 1, 1, 0.16);
-            cr.arc(cx, cy, radius, 0, 2 * Math.PI);
+            cr.arc(cx, cy, radius, GAUGE_START_ANGLE, GAUGE_END_ANGLE);
             cr.stroke();
 
-            const arc = circleArcAngles(clamped, strokeWidth, radius);
+            const arc = gaugeArcAngles(displayPct, strokeWidth, radius);
             if (arc) {
                 cr.setSourceRGBA(r, g, b, a);
-                if (!arc.full)
-                    cr.setLineCap(Cairo.LineCap.ROUND);
                 cr.arc(cx, cy, radius, arc.startAngle, arc.endAngle);
                 cr.stroke();
             }
 
             cr.$dispose();
         });
-        const pctLabel = new St.Label({
-            text: circlePercentText(clamped),
-            style_class: 'agent-quota-circle-pct',
-            style: `font-size: ${fontSize}px;`,
-            x_align: Clutter.ActorAlign.CENTER,
-            y_align: Clutter.ActorAlign.CENTER,
-            x_expand: true,
-            y_expand: true,
-        });
         container.add_child(area);
-        container.add_child(pctLabel);
+
+        if (percentText) {
+            const pctLabel = new St.Label({
+                text: percentText,
+                style_class: insufficient
+                    ? 'agent-quota-circle-pct agent-quota-insufficient'
+                    : 'agent-quota-circle-pct',
+                style: `font-size: ${fontSize}px;`,
+                x_align: Clutter.ActorAlign.CENTER,
+                y_align: Clutter.ActorAlign.CENTER,
+                x_expand: true,
+                y_expand: true,
+            });
+            pctLabel.clutter_text.line_alignment = Pango.Alignment.CENTER;
+            pctLabel.translation_y = Math.round(centerY + offsetPx - gaugeHeight / 2);
+            // Let St.Label centre the text in the gauge; the previous ink-extent
+            // nudge over-corrected wide values such as "100".
+            container.add_child(pctLabel);
+        }
         return container;
     }
 
@@ -686,6 +972,13 @@ export default class AgentQuotaExtension extends Extension {
                 if (this._settings.get_user_value(key) === null)
                     this._settings.set_boolean(key, true);
             }
+        }
+        // The widget layout replaced the per-provider reset switches with one
+        // global rule.  Preserve an explicit old provider choice on upgrade.
+        if (this._settings.get_user_value('show-reset-when-full-global') === null
+            && PROVIDER_KEYS.some(provider =>
+                this._settings.get_user_value(`show-reset-when-full-${provider}`)?.deepUnpack())) {
+            this._settings.set_boolean('show-reset-when-full-global', true);
         }
         this._indicator = new AgentQuotaIndicator(
             this.dir,

@@ -5,6 +5,7 @@
 .agent-quota-icon-box {
     width: 22px;
     height: 22px;
+    margin-right: 7px;
 }
 
 .agent-quota-ok {
@@ -63,6 +64,7 @@
     background-color: #6f8f78;
 }
 
+
 .agent-quota-meter-fill.remaining[style*="width: 0"] {
     background-color: transparent;
 }
@@ -71,13 +73,22 @@
     background-color: #ff7b72;
 }
 
+.agent-quota-meter-fill.insufficient {
+    background-color: #8a8a8a;
+}
+
 .agent-quota-provider {
     font-weight: bold;
 }
 
+.agent-quota-provider-icon-box {
+    width: 18px;
+    height: 18px;
+    margin-right: 2px;
+}
+
 .agent-quota-provider-icon {
-    icon-size: 17px;
-    margin-right: 7px;
+    icon-size: 18px;
 }
 
 .agent-quota-provider-block {
@@ -116,6 +127,10 @@
     font-size: 0.78em;
 }
 
+.agent-quota-insufficient {
+    color: #8a8a8a;
+}
+
 .agent-quota-reset {
     margin-left: 10px;
 }
@@ -142,6 +157,10 @@
     font-size: 8.5px;
     font-weight: bold;
     text-align: center;
+}
+
+.agent-quota-circle-pct.agent-quota-insufficient {
+    color: #8a8a8a;
 }
 
 .agent-quota-circle-text {
@@ -174,4 +193,19 @@
 
 .agent-quota-secondary {
     max-width: 360px;
+}
+
+/* Widget-style popup: the card is only a background.  Headers and gauges are
+   positioned on the same global grid so gauges line up across providers. */
+.agent-quota-widget-grid {
+    background-color: transparent;
+}
+
+.agent-quota-widget-card {
+    background-color: rgba(127, 127, 127, 0.14);
+    border-radius: 10px;
+}
+
+.agent-quota-widget-menu-item {
+    padding: 0;
 }

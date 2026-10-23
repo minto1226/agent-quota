@@ -68,10 +68,15 @@
       <summary>Show user information in provider headers</summary>
       <description>Show the account name next to each provider plan in the popup. Turn off to show only the plan.</description>
     </key>
+    <key name="show-org-name" type="b">
+      <default>true</default>
+      <summary>Show organization names in Team/Business plans</summary>
+      <description>Append the Claude or Codex workspace name to Team/Business plan labels. Turn off to show only the plan family.</description>
+    </key>
     <key name="meter-style" type="s">
       <default>'circle'</default>
       <summary>Quota progress indicator style</summary>
-      <description>Render percentage quotas as compact circular gauges ('circle') or full-width horizontal bars ('bar').</description>
+      <description>Render percentage quotas as compact gauges ('circle') or full-width horizontal bars ('bar').</description>
     </key>
     <key name="browser-claude" type="s"><default>''</default><summary>Claude cookie browser</summary></key>
     <key name="browser-codex" type="s"><default>''</default><summary>Codex cookie browser</summary></key>
@@ -120,7 +125,27 @@
     <key name="provider-columns" type="i">
       <default>1</default>
       <range min="1" max="4"/>
-      <summary>Number of provider columns shown side-by-side</summary>
+      <summary>Maximum provider columns</summary>
+      <description>Manual layout uses this as the column count when no explicit breaks are set. Auto grid chooses the squarest column count up to this value.</description>
+    </key>
+    <key name="metric-options" type="as">
+      <default>[]</default>
+      <summary>Detected quota bars per provider</summary>
+      <description>Internal list of provider:label entries written by the popup so Preferences can offer per-provider bar visibility switches.</description>
+    </key>
+    <key name="hidden-metrics" type="as">
+      <default>[]</default>
+      <summary>Hidden quota bars</summary>
+      <description>Provider:label entries hidden from the popup. An empty list shows every detected bar.</description>
+    </key>
+    <key name="provider-layout" type="s">
+      <default>'manual'</default>
+      <choices>
+        <choice value="manual"/>
+        <choice value="auto"/>
+      </choices>
+      <summary>Provider column layout</summary>
+      <description>Manual respects the provider column count and explicit column breaks. Auto grid packs providers into the squarest grid up to the maximum column count, preserving provider order.</description>
     </key>
     <key name="provider-column-spacing" type="i">
       <default>24</default>
@@ -133,13 +158,81 @@
     </key>
     <key name="circle-text-position" type="s">
       <default>'below'</default>
-      <summary>Position of label and reset text relative to circular gauges</summary>
-      <description>Place the window label and reset time centered below each circle ('below') or to its right ('right').</description>
+      <summary>Position of label and reset text relative to gauges</summary>
+      <description>Place the window label and reset time centered below each gauge ('below') or to its right ('right').</description>
+    </key>
+    <key name="gauge-percent" type="s">
+      <default>'percent'</default>
+      <choices>
+        <choice value="percent"/>
+        <choice value="number"/>
+        <choice value="hidden"/>
+      </choices>
+      <summary>Gauge percentage text</summary>
+      <description>Show the value in the gauge opening as 99%, 99, or not at all.</description>
+    </key>
+    <key name="gauge-percent-offset" type="i">
+      <default>35</default>
+      <range min="-50" max="100"/>
+      <summary>Gauge percentage distance from centre</summary>
+      <description>Move the gauge percentage below the centre by this percentage of the gauge radius. 0 keeps it centred; 100 puts it at the bottom edge.</description>
+    </key>
+    <key name="gauge-percent-font-size" type="i">
+      <default>0</default>
+      <range min="0" max="32"/>
+      <summary>Gauge percentage font size</summary>
+      <description>Font size in pixels for the value inside the gauge. 0 derives the size from the gauge radius.</description>
+    </key>
+    <key name="gauge-label-font-size" type="i">
+      <default>11</default>
+      <range min="6" max="24"/>
+      <summary>Gauge label font size</summary>
+      <description>Font size in pixels for the window label below each gauge.</description>
+    </key>
+    <key name="gauge-reset-font-size" type="i">
+      <default>10</default>
+      <range min="6" max="24"/>
+      <summary>Gauge countdown font size</summary>
+      <description>Font size in pixels for the reset countdown below each gauge.</description>
     </key>
     <key name="popup-width" type="i">
       <default>360</default>
       <range min="50" max="720"/>
       <summary>Width of provider rows in the popup</summary>
+    </key>
+    <key name="popup-layout" type="s">
+      <default>''</default>
+      <summary>Widget popup layout</summary>
+      <description>JSON layout for the widget-style popup. An empty value keeps the classic provider-column layout.</description>
+    </key>
+    <key name="layout-columns" type="i">
+      <default>3</default>
+      <range min="1" max="5"/>
+      <summary>Global widget grid columns</summary>
+      <description>Number of gauge columns shared by every provider card in the widget layout.</description>
+    </key>
+    <key name="layout-gap" type="i">
+      <default>12</default>
+      <range min="0" max="32"/>
+      <summary>Widget card and cell gap</summary>
+      <description>Horizontal and vertical gap between provider cards and gauge cells in the widget layout.</description>
+    </key>
+    <key name="layout-padding" type="i">
+      <default>12</default>
+      <range min="0" max="24"/>
+      <summary>Widget card inner padding</summary>
+      <description>Space between a card background and its header and gauges.</description>
+    </key>
+    <key name="layout-gauge-spacing" type="i">
+      <default>8</default>
+      <range min="0" max="32"/>
+      <summary>Widget gauge spacing</summary>
+      <description>Horizontal and vertical space between gauge cells inside a card.</description>
+    </key>
+    <key name="show-reset-when-full-global" type="b">
+      <default>false</default>
+      <summary>Show reset time when a widget gauge is full</summary>
+      <description>Apply one reset-display rule to every provider card in the widget layout.</description>
     </key>
   </schema>
 </schemalist>
