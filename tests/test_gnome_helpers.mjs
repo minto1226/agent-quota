@@ -16,13 +16,19 @@ function loadModule(name) {
     return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 }
 
-const {resetText, shouldShowReset} = await loadModule('reset-display.js');
-const {providerHeader} = await loadModule('provider-header.js');
+const {resetText, resetTextGlobal, shouldShowReset, shouldShowResetGlobal} = await loadModule('reset-display.js');
+const {providerPlan, providerUser} = await loadModule('provider-header.js');
 const {
+    autoProviderColumns,
     chunkCircleMetrics,
     chunkProviderColumns,
-    circleArcAngles,
     circlePercentText,
+    displayMetricValue,
+    gaugeArcAngles,
+    GAUGE_END_ANGLE,
+    GAUGE_START_ANGLE,
+    estimateProviderHeight,
+    filterVisibleMetrics,
     headerSpacingKeyForStyle,
     isPercentageMetric,
     meterFillColor,
@@ -31,6 +37,8 @@ const {
     normalizeProviderOrder,
     orderProviderStatuses,
     paddingKeyForStyle,
+    parseMetricOptions,
+    providerColumnsHeight,
     spacingKeyForStyle,
 } = await loadModule('meter-layout.js');
 
@@ -84,31 +92,32 @@ const accountStatus = {
     source: 'browser cookies',
 };
 
-test('user information on keeps the original plan and user header', () => {
-    assert.equal(providerHeader(accountStatus, true), 'Max 5x · person@example.com');
-    // The default argument preserves the header for callers that omit it.
-    assert.equal(providerHeader(accountStatus), 'Max 5x · person@example.com');
+test('provider plan replaces the provider name and can hide org names', () => {
+    assert.equal(providerPlan(accountStatus), 'Max 5x');
+    assert.equal(
+        providerPlan({key: 'claude', name: 'Claude', plan: 'Team (Elsa Lab)'}),
+        'Team (Elsa Lab)',
+    );
+    assert.equal(
+        providerPlan({key: 'claude', plan: 'Team (Elsa Lab)'}, false),
+        'Team',
+    );
+    assert.equal(
+        providerPlan({key: 'codex', plan: 'Business (Studio)'}, false),
+        'Business',
+    );
+    // Only Claude and Codex strip workspace suffixes.
+    assert.equal(providerPlan({key: 'go', plan: 'Team (Studio)'}, false), 'Team (Studio)');
+    assert.equal(providerPlan({key: 'gemini', plan: '', name: 'Gemini'}), 'Gemini');
+    assert.equal(providerPlan({plan: null, name: null}), '');
 });
 
-test('user information off leaves only the plan', () => {
-    assert.equal(providerHeader(accountStatus, false), 'Max 5x');
-    assert.equal(providerHeader({plan: 'Pro', user: 'a@b.c', source: 'account'}, false), 'Pro');
-});
-
-test('user information off never leaks the source fallback', () => {
-    const colab = {plan: 'Google AI Plans', user: '', source: 'colab-cli oauth'};
-    assert.equal(providerHeader(colab, true), 'Google AI Plans');
-    assert.equal(providerHeader(colab, false), 'Google AI Plans');
-    const anonymous = {...colab, plan: ''};
-    assert.equal(providerHeader(anonymous, true), 'colab-cli oauth');
-    assert.equal(providerHeader(anonymous, false), '');
-});
-
-test('user information off tolerates missing fields without separators', () => {
-    assert.equal(providerHeader({}, false), '');
-    assert.equal(providerHeader({plan: null, user: null, source: null}, false), '');
-    assert.equal(providerHeader({plan: '', user: 'person@example.com', source: 'account'}, false), '');
-    assert.equal(providerHeader({plan: null, user: null, source: null}, true), '');
+test('provider user is shown only when user information is enabled', () => {
+    assert.equal(providerUser(accountStatus, true), 'person@example.com');
+    assert.equal(providerUser(accountStatus), 'person@example.com');
+    assert.equal(providerUser(accountStatus, false), '');
+    assert.equal(providerUser({}, true), '');
+    assert.equal(providerUser({plan: 'Pro', user: null, source: 'account'}, true), '');
 });
 
 test('header rendering never mutates the provider payload', () => {
@@ -121,8 +130,10 @@ test('header rendering never mutates the provider payload', () => {
         metrics: [{label: '7d', value: '80%'}],
     };
     const snapshot = JSON.stringify(status);
-    providerHeader(status, true);
-    providerHeader(status, false);
+    providerPlan(status, true);
+    providerPlan(status, false);
+    providerUser(status, true);
+    providerUser(status, false);
     assert.equal(JSON.stringify(status), snapshot);
 });
 
@@ -131,6 +142,10 @@ test('header rendering never mutates the provider payload', () => {
 const extensionDir = new URL('../gnome-shell-extension/', import.meta.url);
 const extensionSource = readFileSync(new URL('extension.js', extensionDir), 'utf8');
 const prefsSource = readFileSync(new URL('prefs.js', extensionDir), 'utf8');
+const webDir = new URL('web-settings/', extensionDir);
+const webSource = ['appearance.js', 'layout-editor.js', 'providers.js', 'general.js', 'store.js']
+    .map(name => readFileSync(new URL(name, webDir), 'utf8')).join('\n');
+const providersConfig = JSON.parse(readFileSync(new URL('providers.json', webDir), 'utf8'));
 const schema = readFileSync(
     new URL('schemas/org.gnome.shell.extensions.agent-quota.gschema.xml', extensionDir),
     'utf8',
@@ -149,7 +164,7 @@ function providerIds(source) {
 }
 
 const providerKeys = listLiteral(extensionSource, 'PROVIDER_KEYS');
-const prefsIds = providerIds(prefsSource);
+const prefsIds = providersConfig.providers.map(provider => provider.id);
 const defaultProviders = schema.match(/<key name="providers"[\s\S]*?<default>([^<]*)<\/default>/)[1];
 
 test('every extension provider has a reset schema key and default entry', () => {
@@ -186,25 +201,22 @@ test('show-user-info schema key defaults to true', () => {
     assert.match(match[1], /<summary>[^<]+<\/summary>/);
 });
 
-test('preferences expose Show user information under Appearance → Popup', () => {
-    assert.match(
-        prefsSource,
-        /const popup = new Adw\.PreferencesGroup\(\{title: 'Popup'\}\);/,
-    );
-    assert.match(
-        prefsSource,
-        /addSwitch\(popup, settings, 'show-user-info', 'Show user information'/,
-    );
+test('web settings expose Show user information under Appearance → Popup', () => {
+    assert.match(webSource, /'show-user-info'/);
+    assert.match(webSource, /Show user information/);
 });
 
-test('extension renders headers through provider-header.js and the setting', () => {
-    assert.match(extensionSource, /import \{providerHeader\} from '\.\/provider-header\.js';/);
+test('extension renders headers through provider-header.js and the settings', () => {
+    assert.match(extensionSource, /import \{providerPlan, providerUser\} from '\.\/provider-header\.js';/);
     assert.match(extensionSource, /get_boolean\('show-user-info'\)/);
-    assert.match(extensionSource, /providerHeader\(status, showUserInfo\)/);
+    assert.match(extensionSource, /get_boolean\('show-org-name'\)/);
+    assert.match(extensionSource, /providerPlan\(status, showOrgName\)/);
+    assert.match(extensionSource, /providerUser\(status, showUserInfo\)/);
     assert.ok(!/function displayUser\(/.test(extensionSource), 'displayUser must live in provider-header.js');
     // The generic `changed` fallback rerenders from the cached payload; the
     // switch must not trigger a provider refetch.
     assert.ok(!extensionSource.includes("key === 'show-user-info'"));
+    assert.ok(!extensionSource.includes("key === 'show-org-name'"));
 });
 
 // --- meter-style: circular progress layout helpers, schema, and preferences ---
@@ -310,6 +322,84 @@ test('chunkProviderColumns splits providers by column count or explicit break ke
     );
 });
 
+const gridStatus = key => ({
+    key,
+    metrics: Array.from({length: 4}, (_, index) => ({label: `m${index}`, pct: 50})),
+});
+const gridOptions = {
+    meterStyle: 'bar',
+    circleColumns: 3,
+    circleRadius: 16,
+    circleTextPosition: 'below',
+    padding: 8,
+    headerSpacing: 8,
+    spacing: 6,
+    popupWidth: 200,
+    columnSpacing: 20,
+};
+
+test('autoProviderColumns preserves order and leaves empty cells bottom-right', () => {
+    const statuses = ['claude', 'codex', 'zai', 'gemini', 'go'].map(gridStatus);
+    const columns = autoProviderColumns(statuses, 3, gridOptions);
+
+    assert.deepEqual(columns.flat().map(status => status.key), statuses.map(status => status.key));
+    assert.ok(columns.length <= 3);
+    for (let index = 1; index < columns.length; index++)
+        assert.ok(columns[index - 1].length >= columns[index].length);
+    // Independent columns keep empty space at the bottom-right: earlier
+    // columns must be at least as tall as later ones.
+    const heights = columns.map(column => column.reduce(
+        (total, status) => total + estimateProviderHeight(status, gridOptions), 0));
+    for (let index = 1; index < heights.length; index++)
+        assert.ok(heights[index - 1] >= heights[index]);
+});
+
+test('autoProviderColumns picks the column count closest to a square', () => {
+    const statuses = ['claude', 'codex', 'zai', 'gemini', 'go'].map(gridStatus);
+    // 2 columns is the only split whose width and estimated height are close.
+    assert.equal(autoProviderColumns(statuses, 3, gridOptions).length, 2);
+    assert.deepEqual(
+        autoProviderColumns(statuses, 1, gridOptions).map(column => column.map(status => status.key)),
+        [statuses.map(status => status.key)],
+    );
+});
+
+test('provider height estimates grow with the number of metrics', () => {
+    const empty = {key: 'empty', metrics: []};
+    const one = {key: 'one', metrics: [{label: '5h', pct: 50}]};
+    const four = gridStatus('four');
+
+    assert.ok(estimateProviderHeight(one, gridOptions) > estimateProviderHeight(empty, gridOptions));
+    assert.ok(estimateProviderHeight(four, gridOptions) > estimateProviderHeight(one, gridOptions));
+    assert.equal(providerColumnsHeight([[four, one]], gridOptions), estimateProviderHeight(four, gridOptions) + estimateProviderHeight(one, gridOptions));
+});
+
+test('parseMetricOptions groups detected bars by provider', () => {
+    const grouped = parseMetricOptions([
+        'claude:5h',
+        'claude:7d',
+        'codex:5h',
+        'claude:5h',
+        'bad-entry',
+        'empty:',
+    ]);
+    assert.deepEqual([...grouped.keys()], ['claude', 'codex']);
+    assert.deepEqual(grouped.get('claude'), ['5h', '7d']);
+    assert.deepEqual(grouped.get('codex'), ['5h']);
+});
+
+test('filterVisibleMetrics hides provider:label entries only', () => {
+    const statuses = [
+        {key: 'claude', metrics: [{label: '5h'}, {label: '7d'}]},
+        {key: 'codex', metrics: [{label: '5h'}]},
+    ];
+    const visible = filterVisibleMetrics(statuses, ['claude:7d', 'codex:missing']);
+    assert.deepEqual(visible[0].metrics.map(metric => metric.label), ['5h']);
+    assert.deepEqual(visible[1].metrics.map(metric => metric.label), ['5h']);
+    // The original payload is not mutated.
+    assert.deepEqual(statuses[0].metrics.map(metric => metric.label), ['5h', '7d']);
+});
+
 test('normalizeProviderOrder and orderProviderStatuses sort providers while preserving multi-workspace order', () => {
     assert.deepEqual(
         normalizeProviderOrder(['gemini', 'claude'], ['claude', 'codex', 'gemini', 'go']),
@@ -339,30 +429,56 @@ test('meterFillColor returns palette RGBA tuples for ok, warning, critical, and 
     assert.notDeepEqual(meterFillColor('ok', true, true), meterFillColor('ok', true, false));
 });
 
-test('circlePercentText clamps and rounds percentages for inside-ring display', () => {
-    assert.equal(circlePercentText(100), '100%');
-    assert.equal(circlePercentText(89.4), '89%');
-    assert.equal(circlePercentText(27.68), '28%');
-    assert.equal(circlePercentText(-5), '0%');
-    assert.equal(circlePercentText(120), '100%');
+test('meterFillColor returns neutral gray for an insufficient balance', () => {
+    assert.deepEqual(
+        meterFillColor('ok', true, false, true),
+        [0x8a / 255, 0x8a / 255, 0x8a / 255, 1.0],
+    );
+    assert.notDeepEqual(
+        meterFillColor('ok', true, true, true),
+        meterFillColor('ok', true, true, false),
+    );
 });
 
-test('circleArcAngles decreases clockwise from 12 oclock as quota is consumed', () => {
-    assert.equal(circleArcAngles(0), null);
-    assert.deepEqual(circleArcAngles(100), {full: true, startAngle: 0, endAngle: 2 * Math.PI});
+test('circlePercentText floors percentages and honours display modes', () => {
+    assert.equal(circlePercentText(100), '100%');
+    assert.equal(circlePercentText(89.4), '89%');
+    assert.equal(circlePercentText(27.68), '27%');
+    assert.equal(circlePercentText(-5), '0%');
+    assert.equal(circlePercentText(120), '100%');
+    assert.equal(circlePercentText(99.6, 'number'), '99');
+    assert.equal(circlePercentText(99.6, 'hidden'), '');
+    assert.equal(circlePercentText(99.6, 'bogus'), '99%');
+});
 
-    const arc90 = circleArcAngles(90);
-    const arc50 = circleArcAngles(50);
-    const arc28 = circleArcAngles(28);
+test('displayMetricValue floors percentage values but keeps amounts', () => {
+    assert.equal(displayMetricValue({label: '5h', value: '99.7%', pct: 99.7}), '99%');
+    assert.equal(displayMetricValue({label: '7d', value: '100%', pct: 100}), '100%');
+    assert.equal(displayMetricValue({label: 'Credits', value: '1.87 / 10', pct: 19}), '1.87 / 10');
+    assert.equal(displayMetricValue({label: 'Credits', value: '0 credits', pct: null}), '0 credits');
+});
+
+test('gaugeArcAngles keeps the bottom opening fixed and shrinks the remainder', () => {
+    assert.equal(gaugeArcAngles(0), null);
+    assert.deepEqual(gaugeArcAngles(100), {
+        full: true,
+        startAngle: GAUGE_START_ANGLE,
+        endAngle: GAUGE_END_ANGLE,
+    });
+
+    const arc90 = gaugeArcAngles(90);
+    const arc50 = gaugeArcAngles(50);
+    const arc28 = gaugeArcAngles(28);
     assert.equal(arc90.full, false);
-    assert.equal(arc90.endAngle, 1.5 * Math.PI);
-    assert.equal(arc50.endAngle, 1.5 * Math.PI);
-    assert.equal(arc28.endAngle, 1.5 * Math.PI);
-    // As remaining quota drops from 90% -> 50% -> 28%, startAngle advances
-    // clockwise (increasing angle) toward 12 o'clock (1.5 * PI).
-    assert.ok(arc90.startAngle < arc50.startAngle);
-    assert.ok(arc50.startAngle < arc28.startAngle);
+    assert.equal(arc90.startAngle, GAUGE_START_ANGLE);
+    assert.equal(arc50.startAngle, GAUGE_START_ANGLE);
+    assert.equal(arc28.startAngle, GAUGE_START_ANGLE);
+    // As remaining quota drops, the arc shrinks from the right edge back
+    // toward the fixed lower-left end of the opening.
+    assert.ok(arc90.endAngle > arc50.endAngle);
+    assert.ok(arc50.endAngle > arc28.endAngle);
     assert.ok(arc28.startAngle < arc28.endAngle);
+    assert.ok(arc90.endAngle - arc90.startAngle < GAUGE_END_ANGLE - GAUGE_START_ANGLE);
 });
 
 test('paddingKeyForStyle, headerSpacingKeyForStyle, and spacingKeyForStyle keep separate keys for circle and bar', () => {
@@ -380,16 +496,114 @@ test('paddingKeyForStyle, headerSpacingKeyForStyle, and spacingKeyForStyle keep 
     assert.ok(schema.includes('name="circle-columns"'));
     assert.ok(schema.includes('name="provider-order"'));
     assert.ok(schema.includes('name="provider-columns"'));
+    assert.ok(schema.includes('name="provider-layout"'));
+    assert.ok(schema.includes('name="gauge-percent"'));
+    assert.ok(schema.includes('name="gauge-percent-offset"'));
+    assert.ok(schema.includes('name="gauge-percent-font-size"'));
+    assert.ok(schema.includes('name="gauge-label-font-size"'));
+    assert.ok(schema.includes('name="gauge-reset-font-size"'));
+    assert.ok(schema.includes('name="show-org-name"'));
+    assert.ok(schema.includes('name="metric-options"'));
+    assert.ok(schema.includes('name="hidden-metrics"'));
     assert.ok(schema.includes('name="provider-column-spacing"'));
     assert.ok(schema.includes('name="provider-column-breaks"'));
     assert.ok(schema.includes('name="circle-text-position"'));
 });
 
-test('meter-style schema key defaults to circle and is wired into prefs and extension', () => {
+test('legacy provider-layout key remains only for the silent fallback', () => {
+    const match = schema.match(/<key name="provider-layout" type="s">([\s\S]*?)<\/key>/);
+    assert.ok(match, 'schema lacks provider-layout');
+    assert.match(match[1], /<default>'manual'<\/default>/);
+    assert.ok(!prefsSource.includes('addProviderLayout'));
+    assert.match(extensionSource, /get_string\('provider-layout'\)/);
+    assert.match(extensionSource, /autoProviderColumns\(statuses, providerColumns/);
+});
+
+test('gauge-percent and show-org-name schema keys are wired into prefs and extension', () => {
+    const gauge = schema.match(/<key name="gauge-percent" type="s">([\s\S]*?)<\/key>/);
+    assert.ok(gauge, 'schema lacks gauge-percent');
+    assert.match(gauge[1], /<default>'percent'<\/default>/);
+    assert.match(gauge[1], /<choice value="hidden"\/>/);
+    assert.match(webSource, /Gauge percentage/);
+    assert.match(extensionSource, /get_string\('gauge-percent'\)/);
+    assert.match(extensionSource, /get_int\('gauge-percent-offset'\)/);
+    assert.match(extensionSource, /get_int\('gauge-percent-font-size'\)/);
+    assert.match(extensionSource, /get_int\('gauge-label-font-size'\)/);
+    assert.match(extensionSource, /get_int\('gauge-reset-font-size'\)/);
+    assert.match(webSource, /gauge-percent-offset/);
+    assert.match(webSource, /gauge-percent-font-size/);
+    assert.match(webSource, /gauge-label-font-size/);
+    assert.match(webSource, /gauge-reset-font-size/);
+    assert.match(webSource, /Displayed bars/);
+    assert.match(extensionSource, /filterVisibleMetrics\(/);
+    assert.match(extensionSource, /_rememberMetricOptions\(/);
+    assert.match(extensionSource, /agent-quota-provider-columns/);
+    assert.ok(!extensionSource.includes('zipProviderRows'));
+
+    const org = schema.match(/<key name="show-org-name" type="b">([\s\S]*?)<\/key>/);
+    assert.ok(org, 'schema lacks show-org-name');
+    assert.match(org[1], /<default>true<\/default>/);
+    assert.match(extensionSource, /get_boolean\('show-org-name'\)/);
+    assert.match(extensionSource, /providerPlan\(status, showOrgName\)/);
+});
+
+test('bar mode is no longer exposed in preferences', () => {
     const match = schema.match(/<key name="meter-style" type="s">([\s\S]*?)<\/key>/);
-    assert.ok(match, 'schema lacks meter-style');
+    assert.ok(match, 'legacy meter-style key should remain for fallback');
     assert.match(match[1], /<default>'circle'<\/default>/);
-    assert.match(prefsSource, /addMeterStyle\(popup, settings\)/);
-    assert.match(extensionSource, /get_string\('meter-style'\)/);
-    assert.ok(!extensionSource.includes("key === 'meter-style'"));
+    assert.ok(!prefsSource.includes('addMeterStyle'));
+    assert.ok(!prefsSource.includes('Progress style'));
+    // The hidden classic fallback is gauge-only too.
+    assert.ok(!extensionSource.includes("get_string('meter-style')"));
+    assert.match(extensionSource, /meterStyle = 'circle'/);
+});
+
+// --- widget-style global grid ---
+
+test('widget layout schema and renderer are wired', () => {
+    assert.match(schema, /<key name="popup-layout" type="s">/);
+    assert.match(schema, /<key name="layout-columns" type="i">/);
+    assert.match(schema, /<key name="layout-gap" type="i">/);
+    assert.match(schema, /<key name="layout-padding" type="i">/);
+    assert.match(schema, /<key name="layout-gauge-spacing" type="i">/);
+    assert.match(webSource, /renderLayout/);
+    assert.match(webSource, /layout-padding/);
+    assert.match(webSource, /layout-gauge-spacing/);
+    assert.match(extensionSource, /get_int\('layout-padding'\)/);
+    assert.match(extensionSource, /get_int\('layout-gauge-spacing'\)/);
+    assert.match(webSource, /gaugeArcAngles\(/);
+    assert.match(webSource, /moveGauge\(/);
+    assert.match(webSource, /parseLayout\(/);
+    assert.match(webSource, /saveLayout\(/);
+    assert.match(extensionSource, /parseLayout\(/);
+    assert.match(extensionSource, /layoutGrid\(/);
+    assert.match(extensionSource, /agent-quota-widget-card/);
+    assert.match(extensionSource, /Clutter\.FixedLayout/);
+    // Layout-only: no user-facing classic switch and no bar mode.
+    assert.ok(!prefsSource.includes('Use widget layout'));
+    assert.ok(!prefsSource.includes('addMeterStyle'));
+    assert.ok(!prefsSource.includes('Progress style'));
+    assert.ok(!prefsSource.includes('addProviderLayout'));
+    assert.ok(!extensionSource.includes("get_string('popup-layout')\n            &&"));
+});
+
+test('widget layout uses one global reset rule', () => {
+    const prefs = {getBoolean: key => key === 'show-reset-when-full-global'};
+    const full = {label: '7d', value: '100%', pct: 99.97, reset: '—'};
+    assert.equal(shouldShowResetGlobal(prefs, full), true);
+    assert.equal(resetTextGlobal(prefs, full), '-');
+    const scheduled = {label: '5h', value: '20%', pct: 20, reset: 'in 2h'};
+    assert.equal(shouldShowResetGlobal(prefs, scheduled), true);
+    assert.equal(resetTextGlobal(prefs, scheduled), 'in 2h');
+    assert.equal(shouldShowResetGlobal({getBoolean: () => false}, full), false);
+});
+
+test('widget reset text collapses no-reset sentences to a dash', () => {
+    const prefs = {getBoolean: () => true};
+    const planned = {label: '7d', value: '100%', pct: 100, reset: 'No reset planned'};
+    assert.equal(resetTextGlobal(prefs, planned), '-');
+    const scheduled = {label: '7d', value: '100%', pct: 100, reset: 'No reset scheduled'};
+    assert.equal(resetTextGlobal(prefs, scheduled), '-');
+    const missing = {label: '7d', value: '100%', pct: 100, reset: '—'};
+    assert.equal(resetTextGlobal(prefs, missing), '-');
 });

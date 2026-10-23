@@ -4,9 +4,9 @@ One command, terminal tables for the AI products that matter when you live insid
 
 ![](./preview.jpg)
 
-`agent-quota` is positioned first as a tracker for subscription-backed and rate-limited AI usage: rolling windows, 7d caps, monthly included quotas, token buckets, and similar limits. That is the main product surface, and today it includes `Claude`, `Codex`, `Copilot`, `Z.ai`, and `OpenCode`, with room for more IDE and platform subscriptions in the same shape. Codex reports both of its included usage windows, the 5-hour and the 7d one, and displays the remaining allowance. The usage table now shows `Plan` and `User` metadata next to each provider's windows; providers that do not expose those fields yet render `—` or `Unknown`.
+`agent-quota` is positioned first as a tracker for subscription-backed and rate-limited AI usage: rolling windows, 7d caps, monthly included quotas, token buckets, and similar limits. That is the main product surface, and today it includes `Claude`, `Codex`, `Copilot`, `Z.ai`, and `OpenCode`, with room for more IDE and platform subscriptions in the same shape. Standard-seat Codex reports both of its included usage windows, the 5-hour and the 7d one, and displays the remaining allowance; when workspace spend controls report one, it also shows the monthly credit allowance used after included usage is exhausted. Legacy usage-based Codex seats have no included windows, so they show the workspace's monthly credit allowance instead; a zero workspace credit balance keeps that percentage but renders the bar and its text neutral gray because the seat cannot spend it. Both seat types use `Business (<workspace name>)` for the plan label. The usage table now shows `Plan` and `User` metadata next to each provider's windows; providers that do not expose those fields yet render `—` or `Unknown`.
 
-Pay-as-you-go balances are still supported, but as a secondary table for credits and prepaid balances such as `OpenCode Zen`, `OpenRouter`, `DeepSeek`, and `Kimi`. Usage-based bars display the remaining allowance, with colour shifting to yellow below 30% and red below 10%; when a provider-wide 7d allowance is exhausted, its other percentage bars turn muted gray-green because they are no longer actionable. Rows without a percentage render as plain text. `Claude` now resolves plan, team, and user details from its account and organization endpoints; `Codex` renders each distinct account or workspace exposed by the configured browser as its own block. Human-readable Codex team/workspace names are still limited by what those session payloads expose.
+Pay-as-you-go balances are still supported, but as a secondary table for credits and prepaid balances such as `OpenCode Zen`, `OpenRouter`, `DeepSeek`, and `Kimi`. Usage-based bars display the remaining allowance, with colour shifting to yellow below 30% and red below 10%; when a provider-wide 7d allowance is exhausted, its other percentage bars turn muted gray-green because they are no longer actionable. Rows without a percentage render as plain text. `Claude` now resolves plan, team, and user details from its account and organization endpoints; `Codex` renders each distinct account or workspace exposed by the configured browser as its own block, taking the workspace name from the accounts endpoint when the session payload omits it.
 
 Originally based on [waybar-ai-usage](https://github.com/NihilDigit/waybar-ai-usage) by [@NihilDigit](https://github.com/NihilDigit).
 
@@ -19,19 +19,28 @@ On GNOME 50 (including Wayland), install the command and extension:
 gnome-extensions enable agent-quota@torridfish
 ```
 
-The installer packages the Python backend into the extension and refreshes the matching global `agent-quota` command, avoiding version skew between terminal and top-bar output. `uv` is required and prepares the extension's local runtime on its first refresh. The extension uses browser cookies for cookie-authenticated providers and stores API keys in `~/.config/agent-quota/`.
+The installer packages the Python backend into the extension and refreshes the matching global `agent-quota` command, avoiding version skew between terminal and top-bar output. `uv` is required and prepares the extension's local runtime on its first refresh. The extension uses browser cookies for cookie-authenticated providers and stores API keys in `~/.config/agent-quota/`. The browser settings server uses the system `/usr/bin/python3` with PyGObject (`python3-gi`); on Debian/Ubuntu install it with `sudo apt install python3-gi`.
 
 Click the gauge in the right side of the top bar for provider details. A red/yellow gauge continues to mean low quota; a small `!` badge means one or more provider fetches failed. Long provider errors are capped so the popup stays usable.
 
 ![](./gnome-preview.png)
 
-Open the popup's **Settings** action (or run `gnome-extensions prefs agent-quota@torridfish`) to:
+Open the popup's **Settings** action (or run `gnome-extensions prefs agent-quota@torridfish`) and the extension launches a local settings server, then opens the settings page in your browser. The GTK Preferences window is only a launcher; it does not duplicate the configuration UI.
 
-- override `config.toml`, choose which providers appear, and reorder them via **Move up / Move down** buttons;
-- configure refresh interval, colour thresholds, progress style (`Circular` gauges by default, or full-width `Bar` meters), multi-column provider layout, and popup spacing;
-- manage all provider-specific options from one **Providers** page, grouped by provider: for cookie-authenticated providers, select its cookie browser (applied on top of the `config.toml` provider set, without enabling the provider override) and open its sign-in page; for OpenCode Go and Colab, copy the CLI sign-in command (`opencode auth login`, `colab usage`); choose which detected Codex workspaces appear; for API-authenticated providers, save its API key; and adjust its popup layout options (including reset time at 100% and starting a new provider column).
+The browser settings page has four sections:
 
-**Appearance → Popup → Show user information** is on by default. It controls the account name shown next to each provider's plan in the popup header; switching it off keeps only the plan, so the header shows neither the user nor the provider-source fallback. This is a presentation-only, GNOME-only switch: it does not change the payload, cache, or CLI output, and it is not data redaction — the extension still fetches and stores the same account data.
+- **General**: override the `config.toml` provider set, choose which providers appear, reorder them, and set the refresh interval.
+- **Providers**: per-provider authentication and display options. For cookie-authenticated providers, choose the signed-in browser and open the sign-in page; for OpenCode Go and Colab, copy the CLI sign-in command (`opencode auth login`, `colab usage`); choose which detected Codex workspaces appear; save API keys; and choose which detected gauges are shown.
+- **Layout**: the shared widget-grid editor. Each provider is a rounded card on one gauge grid. Drag a card by its header to move it, drag a gauge inside a card to reorder it, or use the card list to change gauge columns and move cards with buttons. **Grid columns** (1–5), **Gauge spacing**, **Card gap**, and **Card padding** control the shared geometry, and one global **Show reset time when full** rule applies to every card. Undo/Redo, Reset, and JSON export/import are available.
+- **Appearance**: quota colours, gauge radius, percentage mode/fonts, user/organisation header switches, and the Settings action.
+
+The settings server binds to `127.0.0.1` on a random port, uses a per-launch access token, and stops after 30 minutes without activity. The browser page also has a **Stop server** button. API keys are write-only: the page can report whether a credential is configured, but never reads the existing value back. Credential files remain under `~/.config/agent-quota/` with `0600` permissions.
+
+The classic provider-column renderer remains only as a silent fallback if the widget layout throws; there is no user-facing switch.
+
+Gauges use a 240-degree arc with a fixed 120-degree opening at the bottom. The green remainder is anchored at the lower-left edge and shrinks from the right edge back toward it as quota is consumed; the arc ends are flat rather than rounded. **Gauge percentage** places `99%`, `99`, or no value in that opening, with an optional fixed font size (`0` keeps it proportional to the radius). Popup percentages are always floored (99.6 → 99) so the number can never read above the arc. The provider icon sits next to the plan instead of the provider name; the provider name is redundant with the icon.
+
+**Appearance → Show user information** controls the account name shown on the right side of each provider header; switching it off leaves only the plan. **Show organization name** controls the trailing workspace in Claude/Codex `Team (…)` and `Business (…)` plans. Both are presentation-only, GNOME-only switches: they do not change the payload, cache, or CLI output, and they are not data redaction — the extension still fetches and stores the same account data.
 
 Settings take effect immediately. After installing changed extension JavaScript or CSS on GNOME Shell 50 Wayland, log out and back in once if the installer reports that the in-memory module is still old.
 
@@ -104,7 +113,7 @@ Supported cookie sources: `chrome`, `chromium`, `brave`, `edge`, `firefox`, `hel
 
     WORKSPACE_ID = wrk_xxxxxxxxxxxxxxxx
 
-After Codex has loaded once, open **Settings → Providers → Codex → Displayed workspaces** to choose which ChatGPT workspaces appear in the popup. Leaving every detected workspace selected preserves the default behaviour and automatically includes newly discovered workspaces.
+After Codex has loaded once, open **Providers → Codex → Displayed workspaces** in the browser settings page to choose which ChatGPT workspaces appear in the popup. Leaving every detected workspace selected preserves the default behaviour and automatically includes newly discovered workspaces.
 
 For `Copilot`, `Z.ai`, `OpenRouter`, `DeepSeek`, and `Kimi`, setup will prompt for the token/key when you enable the provider. You can still edit the corresponding `~/.config/agent-quota/*.conf` file manually later. Gemini needs no config file here: an expired token is refreshed with the credentials embedded in the local `agy` binary, so setup collects nothing for it. Add `GEMINI_CLIENT_ID`/`GEMINI_CLIENT_SECRET` to `~/.config/agent-quota/gemini.conf` manually only to override those credentials (see below).
 
