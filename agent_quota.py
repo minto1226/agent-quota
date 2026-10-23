@@ -119,6 +119,11 @@ class Metric:
     is_remaining: bool = False
     is_blocking_period: bool = False
     muted: bool = False
+    # Balance-backed quotas (for example Codex workspace credits) stay visible
+    # when a provider-wide window is exhausted, so they are never muted.
+    is_credit: bool = False
+    # Balance is zero: the bar keeps its percentage but renders neutral gray.
+    insufficient: bool = False
 
 
 @dataclass
@@ -198,8 +203,91 @@ def _adapt_claude(raw: dict) -> list[Metric]:
     return metrics
 
 
+def _format_credit_amount(value: object) -> str:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def _codex_credit_metric(raw: dict) -> Metric | None:
+    """Render the workspace credit allowance Codex seats draw from."""
+    from providers.codex import codex_credit_limit
+
+    credits = raw.get("credits")
+    credits = credits if isinstance(credits, dict) else {}
+    unlimited = bool(credits.get("unlimited"))
+    try:
+        balance = (
+            float(credits["balance"])
+            if credits.get("balance") not in (None, "")
+            else None
+        )
+    except (TypeError, ValueError):
+        balance = None
+    # The balance does not refill on the spend-control reset, so zero credits
+    # must read as unusable even while the monthly limit has room left.
+    insufficient = not unlimited and balance is not None and balance <= 0
+
+    limit = codex_credit_limit(raw)
+    if limit is not None:
+        try:
+            pct = float(limit.get("remaining_percent"))
+        except (TypeError, ValueError):
+            pct = None
+        if pct is None:
+            try:
+                pct = (
+                    float(limit.get("remaining"))
+                    / float(limit.get("limit"))
+                    * 100
+                )
+            except (TypeError, ValueError, ZeroDivisionError):
+                pct = None
+        remaining = limit.get("remaining")
+        total = limit.get("limit")
+        if remaining in (None, "") or total in (None, ""):
+            value = f"{pct:.0f}%" if pct is not None else "—"
+        else:
+            value = f"{_format_credit_amount(remaining)} / {_format_credit_amount(total)}"
+        reset_at = limit.get("reset_at")
+        return Metric(
+            "Credits",
+            value,
+            None if pct is None else max(0.0, min(100.0, pct)),
+            _pad_reset(format_eta(reset_at)) if reset_at else "—",
+            is_remaining=True,
+            is_credit=True,
+            insufficient=insufficient,
+        )
+
+    if unlimited:
+        return Metric(
+            "Credits", "Unlimited", None, "—", is_remaining=True, is_credit=True
+        )
+    if balance is not None:
+        return Metric(
+            "Credits",
+            f"{_format_credit_amount(balance)} credits",
+            None,
+            "—",
+            is_remaining=True,
+            is_credit=True,
+            insufficient=insufficient,
+        )
+    if credits.get("has_credits"):
+        return Metric(
+            "Credits", "Available", None, "—", is_remaining=True, is_credit=True
+        )
+    return None
+
+
 def _adapt_codex(raw: dict) -> list[Metric]:
-    from providers.codex import codex_rate_limit_windows_with_scope
+    from providers.codex import (
+        codex_rate_limit_windows_with_scope,
+        extract_codex_identity,
+    )
 
     metrics = []
     for label, raw_window, provider_wide in codex_rate_limit_windows_with_scope(raw):
@@ -215,6 +303,20 @@ def _adapt_codex(raw: dict) -> list[Metric]:
                 is_blocking_period=provider_wide and _is_weekly_window(raw_window),
             )
         )
+
+    credit = _codex_credit_metric(raw)
+    identity = extract_codex_identity(raw)
+    # The workspace-level isUsageBasedSeatEnabled flag stays true even after a
+    # member moves to a standard seat, so the plan itself is the seat signal.
+    plan = str(identity.get("plan") or raw.get("plan_type") or "").strip().lower()
+    if plan == "self_serve_business_usage_based":
+        # Legacy Codex seats have no included usage, so the workspace credit
+        # allowance replaces the rate-limit windows entirely.
+        return [credit] if credit is not None else metrics
+    # Standard seats keep their included windows; credits are only worth a row
+    # when workspace spend controls define a monthly limit to draw a bar from.
+    if credit is not None and credit.pct is not None:
+        metrics.append(credit)
     return metrics
 
 
@@ -446,6 +548,7 @@ def _apply_provider_constraints(metrics: list[Metric]) -> list[Metric]:
             exhausted
             and metric.pct is not None
             and not metric.is_blocking_period
+            and not metric.is_credit
         )
     return metrics
 
@@ -528,13 +631,14 @@ def _plan_codex(raw: dict) -> str:
     # usage label here would misreport paid personal accounts.
     if identity.get("account_kind") == "personal":
         value = identity.get("account_plan") or value
-    if str(value or "").strip().lower() == "team":
+    if str(value or "").strip().lower() in {
+        "team",
+        "self_serve_business_prolite",
+        "self_serve_business_usage_based",
+    }:
         team_name = identity.get("team_name")
         return f"Business ({team_name})" if team_name else "Business"
     plan = _format_plan_value(value)
-    team_name = identity.get("team_name")
-    if plan == "Team" and team_name:
-        return f"Team ({team_name})"
     return plan
 
 
@@ -1138,13 +1242,17 @@ class _UsageBar:
         value: str,
         is_remaining: bool = False,
         muted: bool = False,
+        insufficient: bool = False,
     ) -> None:
         self.pct = max(0.0, min(100.0, pct))
         self.value = value
         self.is_remaining = is_remaining
         self.muted = muted
+        self.insufficient = insufficient
 
     def _color(self, is_remaining: bool = False) -> str:
+        if self.insufficient:
+            return "grey35"
         if self.muted:
             return "#6f8f78"
         if is_remaining:
@@ -1173,6 +1281,8 @@ class _UsageBar:
         color = self._color(self.is_remaining)
 
         text_color_on_filled = "black" if color == "yellow" else "white"
+        if self.insufficient:
+            text_color_on_filled = "grey70"
         result = Text()
         for i in range(width):
             char = text[i - text_start] if text_start <= i < text_end else " "
@@ -1196,8 +1306,14 @@ class _UsageBar:
 
 def _usage_cell(metric: Metric):
     if metric.pct is None:
-        return Text(metric.value)
-    return _UsageBar(metric.pct, metric.value, metric.is_remaining, metric.muted)
+        return Text(metric.value, style="grey35" if metric.insufficient else "")
+    return _UsageBar(
+        metric.pct,
+        metric.value,
+        metric.is_remaining,
+        metric.muted,
+        metric.insufficient,
+    )
 
 
 class _WindowUsageLine:
@@ -1232,7 +1348,7 @@ class _WindowUsageLine:
             value = self.metric.value
             if len(value) > bar_width:
                 value = value[: max(0, bar_width - 1)] + "…" if bar_width >= 2 else "…"
-            right = Text(value)
+            right = Text(value, style="grey35" if self.metric.insufficient else "")
             if len(right.plain) < bar_width:
                 right.append(" " * (bar_width - len(right.plain)))
         else:
@@ -1241,6 +1357,7 @@ class _WindowUsageLine:
                 self.metric.value,
                 self.metric.is_remaining,
                 self.metric.muted,
+                self.metric.insufficient,
             )
             bar_iter = bar.__rich_console__(
                 console, options.update(max_width=bar_width)
@@ -1448,6 +1565,7 @@ def _status_json(statuses: list[ProviderStatus]) -> dict:
                         "reset": metric.reset,
                         "is_remaining": metric.is_remaining,
                         "muted": metric.muted,
+                        "insufficient": metric.insufficient,
                     }
                     for metric in status.metrics
                 ],

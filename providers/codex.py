@@ -7,10 +7,8 @@ from collections.abc import Mapping
 from curl_cffi import requests
 
 from common import (
-    format_eta,
     get_cached_or_fetch,
     load_cookie_candidates,
-    parse_window_direct,
 )
 
 
@@ -108,14 +106,19 @@ def codex_rate_limit_windows(
     ]
 
 
-def _extract_codex_identity(usage_data: dict, session_data: dict) -> dict:
+def _extract_codex_identity(
+    usage_data: dict, session_data: dict, workspace_name: str = ""
+) -> dict:
     account = session_data.get("account") or {}
     user = session_data.get("user") or {}
+    # The browser session omits the workspace name, so fall back to the name
+    # carried by the accounts endpoint when one is available.
     team_name = (
         account.get("name")
         or account.get("displayName")
         or account.get("organizationName")
         or account.get("workspaceName")
+        or workspace_name
     )
     return {
         "plan": usage_data.get("plan_type") or account.get("planType"),
@@ -127,6 +130,15 @@ def _extract_codex_identity(usage_data: dict, session_data: dict) -> dict:
         "account_name": user.get("email") or usage_data.get("email") or "",
         "account_kind": account.get("structure") or "",
     }
+
+
+def codex_credit_limit(usage: Mapping[str, object]) -> Mapping[str, object] | None:
+    """Return the monthly credit limit Codex reports for this workspace seat."""
+    spend_control = usage.get("spend_control")
+    if not isinstance(spend_control, Mapping):
+        return None
+    limit = spend_control.get("individual_limit")
+    return limit if isinstance(limit, Mapping) else None
 
 
 def extract_codex_identity(raw: dict) -> dict:
@@ -160,7 +172,10 @@ def _get_codex_usage(
 
 
 def _fetch_usage_for_account(
-    cookies_dict: Mapping, impersonate: str, account_id: str
+    cookies_dict: Mapping,
+    impersonate: str,
+    account_id: str,
+    workspace_name: str = "",
 ) -> dict | None:
     """Fetch usage for a single Codex workspace, or None to skip it.
 
@@ -194,7 +209,9 @@ def _fetch_usage_for_account(
         account_headers,
         CODEX_BROWSER_USAGE_URLS,
     )
-    usage_data["identity"] = _extract_codex_identity(usage_data, account_session)
+    usage_data["identity"] = _extract_codex_identity(
+        usage_data, account_session, workspace_name
+    )
     return usage_data
 
 
@@ -289,7 +306,10 @@ def _fetch_codex_usages_from_browser(
                         # others; skip it and keep the workspaces that respond.
                         try:
                             usage_data = _fetch_usage_for_account(
-                                cookies_dict, impersonate, account_id
+                                cookies_dict,
+                                impersonate,
+                                account_id,
+                                str(account.get("name") or ""),
                             )
                         except Exception as e:
                             account_errors.append(f"{account_id}: {e}")
@@ -351,20 +371,23 @@ def get_codex_usage(browsers: list[str] | None = None) -> dict:
 
 
 def print_cli(usage: dict) -> None:
+    # Reuse the table renderer's plan labels and metrics so the standalone
+    # provider script, the TUI, and the GNOME extension stay consistent.
+    from agent_quota import _adapt_codex, _plan_codex
+
     identity = extract_codex_identity(usage)
 
-    print(f"Plan              : {identity.get('plan') or 'Unknown'}")
+    print(f"Plan              : {_plan_codex(usage)}")
     if identity.get("team_name"):
         print(f"Team              : {identity['team_name']}")
     print(
         f"User              : "
         f"{identity.get('user_name') or identity.get('account_name') or 'Unknown'}"
     )
-    for label, raw_window in codex_rate_limit_windows(usage):
-        window = parse_window_direct(raw_window)
+    for metric in _adapt_codex(usage):
         print(
-            f"{label:<18}: {window.utilization:>5.1f}% | "
-            f"Reset in {format_eta(window.resets_at)}"
+            f"{metric.label:<18}: {metric.value:>8} | "
+            f"Reset in {metric.reset}"
         )
 
 
