@@ -7,8 +7,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f7d5a?style=flat-square)](LICENSE)
 
 <p align="center">
-  <img src="./assets/preview.jpg" alt="agent-quota CLI table with quota bars, reset countdowns, plan and user columns" height="300">
-  <img src="./assets/gnome-popup.png" alt="agent-quota GNOME popup with provider cards, gauges, and reset countdowns" height="300">
+  <img src="./assets/preview.jpg" alt="agent-quota CLI table with quota bars, reset countdowns, plan and user columns" height="450">
+  <img src="./assets/gnome-popup.png" alt="agent-quota GNOME popup with provider cards, gauges, and reset countdowns" height="450">
 </p>
 
 <p align="center">
