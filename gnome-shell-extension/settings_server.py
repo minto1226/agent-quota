@@ -5,6 +5,11 @@ The GNOME preferences window is only a launcher.  This process serves the
 web-settings SPA on 127.0.0.1 and bridges it to the extension's GSettings
 schema.  Secrets are write-only: the API can report whether a credential is
 configured, but it never returns the value.
+
+Settings are mirrored into the [gnome] table of the agent-quota config.toml,
+which is the portable source of truth: the table is pushed into GSettings
+when the server starts, and GSettings are written back into it on every
+save.  The extension itself keeps reading GSettings.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import signal
 import sys
 import threading
 import time
+import tomllib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -39,6 +45,12 @@ except (ImportError, ValueError) as error:  # pragma: no cover - host dependent
 
 SCHEMA_ID = "org.gnome.shell.extensions.agent-quota"
 SERVER_VERSION = 1
+CLI_CONFIG_NAME = "config.toml"
+CLI_CONFIG_HEADER = (
+    "# agent-quota configuration\n"
+    "# The [gnome] table mirrors the GNOME extension's GSettings and is\n"
+    "# rewritten by its settings server on every change.\n"
+)
 MAX_BODY_BYTES = 1024 * 1024
 MAX_LAYOUT_BYTES = 100 * 1024
 TOKEN_HEADER = "X-Agent-Quota-Token"
@@ -292,6 +304,83 @@ def validate_layout(layout: object, provider_ids: set[str]) -> str:
     return raw
 
 
+def toml_value(value: object) -> str:
+    """Render a GSettings value as a TOML literal (bool, int, str, or list)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        # JSON string escapes are a subset of TOML basic string escapes.
+        return json.dumps(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    raise ValueError(f"cannot represent {type(value).__name__} in TOML")
+
+
+def replace_gnome_section(contents: str, values: dict[str, object]) -> str:
+    """Return `contents` with its [gnome] table replaced by `values`.
+
+    Everything outside the table is preserved verbatim.  A table header on
+    its own line ends the removed section, so a multi-line value inside it
+    cannot swallow the tables that follow.
+    """
+    kept: list[str] = []
+    skipping = False
+    for line in contents.splitlines():
+        stripped = line.strip()
+        if re.fullmatch(r"\[gnome\]\s*(#.*)?", stripped):
+            skipping = True
+            continue
+        if skipping:
+            if re.match(r"^\[[A-Za-z0-9_.\"'-]+\]\s*(#.*)?$", stripped):
+                skipping = False
+                kept.append(line)
+            continue
+        kept.append(line)
+    section = ["[gnome]"]
+    section.extend(f"{key} = {toml_value(values[key])}" for key in sorted(values))
+    prefix = "\n".join(kept).strip("\n")
+    if not prefix:
+        return "\n".join(CLI_CONFIG_HEADER.splitlines() + section) + "\n"
+    return f"{prefix}\n\n" + "\n".join(section) + "\n"
+
+
+def write_gnome_section(path: Path, values: dict[str, object]) -> None:
+    """Rewrite the [gnome] table of config.toml, creating the file if needed."""
+    contents = path.read_text() if path.exists() else CLI_CONFIG_HEADER
+    updated = replace_gnome_section(contents, values)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(updated)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def load_gnome_section(path: Path) -> dict[str, object]:
+    """Return the [gnome] table of config.toml; empty when absent or invalid."""
+    if not path.exists():
+        return {}
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    section = data.get("gnome")
+    return section if isinstance(section, dict) else {}
+
+
 def write_private_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -325,15 +414,49 @@ class App:
         self.providers = metadata["providers"]
         self.browsers = metadata.get("browsers", [""])
         self.provider_ids = {provider["id"] for provider in self.providers}
-        self.secrets = SecretStore(
-            self.providers,
-            Path(args.config_dir).expanduser() if args.config_dir
-            else Path.home() / ".config" / "agent-quota",
-        )
+        config_dir = Path(args.config_dir).expanduser() if args.config_dir else Path.home() / ".config" / "agent-quota"
+        self.cli_config_path = config_dir / CLI_CONFIG_NAME
+        self.secrets = SecretStore(self.providers, config_dir)
         self.last_activity = time.monotonic()
         self.stop_event = threading.Event()
         self.httpd: ThreadingHTTPServer | None = None
         self._idle_thread: threading.Thread | None = None
+        self._apply_cli_config()
+
+    def _apply_cli_config(self) -> None:
+        """Push the config.toml [gnome] table into GSettings.
+
+        config.toml is the source of truth, so values found there override
+        the current dconf state.  Unknown keys and type mismatches are
+        dropped (they get rewritten from GSettings below), and keys missing
+        from the table are topped up so the file always carries the whole
+        schema and stays portable.
+        """
+        section = load_gnome_section(self.cli_config_path)
+        for key in list(section):
+            if key not in self.backend.keys:
+                sys.stderr.write(f"ignoring unknown setting {key!r} in {self.cli_config_path}\n")
+                del section[key]
+                continue
+            try:
+                self.backend.set(key, section[key])
+            except ValueError as error:
+                sys.stderr.write(f"ignoring {key!r} in {self.cli_config_path}: {error}\n")
+                del section[key]
+        missing = sorted(self.backend.keys - section.keys())
+        if not missing:
+            return
+        try:
+            write_gnome_section(self.cli_config_path, {**section, **{key: self.backend.get(key) for key in missing}})
+        except Exception as error:
+            sys.stderr.write(f"could not update {self.cli_config_path}: {error}\n")
+
+    def _persist_cli_config(self) -> None:
+        """Mirror the current GSettings into config.toml's [gnome] table."""
+        try:
+            write_gnome_section(self.cli_config_path, self.backend.all())
+        except Exception as error:
+            sys.stderr.write(f"could not update {self.cli_config_path}: {error}\n")
 
     def touch(self) -> None:
         self.last_activity = time.monotonic()
@@ -358,7 +481,9 @@ class App:
     def set_setting(self, key: str, value: object) -> object:
         if key in {"popup-layout", "metric-options", "codex-workspace-options"}:
             raise ValueError(f"{key} cannot be changed through this endpoint")
-        return self.backend.set(key, value)
+        result = self.backend.set(key, value)
+        self._persist_cli_config()
+        return result
 
     def set_layout(self, payload: dict[str, object]) -> None:
         layout = payload.get("layout")
@@ -382,6 +507,7 @@ class App:
         for key, (lower, upper) in allowed.items():
             if key in settings:
                 self.backend.set(key, settings[key])
+        self._persist_cli_config()
 
     def stop(self) -> None:
         self.stop_event.set()

@@ -12,6 +12,7 @@ import json
 import os
 import stat
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -100,6 +101,66 @@ class LayoutValidationTests(unittest.TestCase):
     def test_layout_rejects_out_of_range_columns(self) -> None:
         with self.assertRaises(ValueError):
             server.validate_layout({"columns": 6, "providers": []}, {"copilot"})
+
+
+class TomlValueTests(unittest.TestCase):
+    def test_scalars(self) -> None:
+        self.assertEqual(server.toml_value(True), "true")
+        self.assertEqual(server.toml_value(False), "false")
+        self.assertEqual(server.toml_value(12), "12")
+        self.assertEqual(server.toml_value("bar"), '"bar"')
+
+    def test_strings_are_escaped(self) -> None:
+        self.assertEqual(server.toml_value('say "hi"'), '"say \\"hi\\""')
+        self.assertEqual(server.toml_value("back\\slash"), '"back\\\\slash"')
+
+    def test_lists(self) -> None:
+        self.assertEqual(server.toml_value(["claude", "codex"]), '["claude", "codex"]')
+        self.assertEqual(server.toml_value([]), "[]")
+
+    def test_unsupported_type_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            server.toml_value({"nope": 1})
+
+
+class GnomeSectionTests(unittest.TestCase):
+    def test_replace_appends_when_missing(self) -> None:
+        updated = server.replace_gnome_section('enabled = ["claude"]\n', {"meter-style": "bar"})
+        parsed = tomllib.loads(updated)
+        self.assertEqual(parsed["enabled"], ["claude"])
+        self.assertEqual(parsed["gnome"], {"meter-style": "bar"})
+
+    def test_replace_drops_previous_table(self) -> None:
+        contents = 'enabled = ["claude"]\n\n[gnome]\nmeter-style = "circle"\ncircle-radius = 20\n'
+        updated = server.replace_gnome_section(contents, {"meter-style": "bar"})
+        parsed = tomllib.loads(updated)
+        self.assertEqual(parsed["enabled"], ["claude"])
+        self.assertEqual(parsed["gnome"], {"meter-style": "bar"})
+        self.assertNotIn("circle-radius", updated)
+
+    def test_replace_preserves_later_tables(self) -> None:
+        contents = '[gnome]\na = 1\n\n[other]\nb = "x"\n'
+        updated = server.replace_gnome_section(contents, {"a": 2})
+        parsed = tomllib.loads(updated)
+        self.assertEqual(parsed["gnome"], {"a": 2})
+        self.assertEqual(parsed["other"], {"b": "x"})
+
+    def test_write_creates_and_roundtrips(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            server.write_gnome_section(path, {"meter-style": "bar", "popup-width": 480})
+            self.assertEqual(tomllib.loads(path.read_text())["gnome"], {"meter-style": "bar", "popup-width": 480})
+            server.write_gnome_section(path, {"meter-style": "circle"})
+            self.assertEqual(tomllib.loads(path.read_text())["gnome"], {"meter-style": "circle"})
+
+    def test_load_section(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            self.assertEqual(server.load_gnome_section(path), {})
+            path.write_text('enabled = ["a"]\n[gnome]\n"refresh-seconds" = 30\n')
+            self.assertEqual(server.load_gnome_section(path), {"refresh-seconds": 30})
+            path.write_text("this is not toml [")
+            self.assertEqual(server.load_gnome_section(path), {})
 
 
 class SecretStoreTests(unittest.TestCase):
