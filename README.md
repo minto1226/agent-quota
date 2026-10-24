@@ -1,15 +1,14 @@
-# agent-quota 🎚️ — Every AI limit, in your terminal and panel.
+# agent-quota
 
 > One quota tracker for the AI coding tools you actually use: a terminal table, a GNOME popup, and a shared provider backend.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square)](pyproject.toml)
 [![GNOME 50](https://img.shields.io/badge/GNOME-50-4A86CF?style=flat-square)](#gnome-popup)
-[![GitHub](https://img.shields.io/badge/GitHub-torridfish%2Fagent--quota-181717?style=flat-square)](https://github.com/torridfish/agent-quota)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f7d5a?style=flat-square)](LICENSE)
 
 <p align="center">
-  <img src="./assets/preview.jpg" alt="agent-quota CLI table with quota bars, reset countdowns, plan and user columns" width="620">
-  <img src="./assets/gnome-popup.png" alt="agent-quota GNOME popup with provider cards, gauges, and reset countdowns" width="300">
+  <img src="./assets/preview.jpg" alt="agent-quota CLI table with quota bars, reset countdowns, plan and user columns" height="300">
+  <img src="./assets/gnome-popup.png" alt="agent-quota GNOME popup with provider cards, gauges, and reset countdowns" height="300">
 </p>
 
 <p align="center">
