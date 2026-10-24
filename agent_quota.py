@@ -985,17 +985,37 @@ def save_config(enabled: list[str], *, show_user: bool = True) -> None:
     """Persist the enabled-provider list as TOML.
 
     Hand-written rather than using a TOML writer dep — the schema is minimal.
+    Content the CLI does not manage (e.g. the [gnome] table written by the
+    GNOME extension's settings server) is preserved verbatim.
     """
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     body = ", ".join(f'"{k}"' for k in enabled)
-    lines = [
+    header = [
         "# agent-quota configuration",
         "# Edit this file or run `agent-quota setup` to change.",
-        f"enabled = [{body}]",
     ]
+    managed = [f"enabled = [{body}]"]
     if not show_user:
-        lines.append("show_user = false")
-    CONFIG_PATH.write_text("\n".join(lines) + "\n")
+        managed.append("show_user = false")
+
+    preserved: list[str] = []
+    if CONFIG_PATH.exists():
+        in_managed_zone = True
+        for line in CONFIG_PATH.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                in_managed_zone = False  # first table header: keep the rest verbatim
+            if in_managed_zone:
+                key = stripped.split("=", 1)[0].strip()
+                if key in {"enabled", "show_user"}:
+                    continue
+                if stripped in {"# agent-quota configuration", "# Edit this file or run `agent-quota setup` to change."}:
+                    continue
+            preserved.append(line)
+    text = "\n".join(header + managed + preserved)
+    if not text.endswith("\n"):
+        text += "\n"
+    CONFIG_PATH.write_text(text)
 
 
 def _load_secret_value(path: Path, key: str) -> str | None:
