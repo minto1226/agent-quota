@@ -13,11 +13,13 @@ const PROVIDERS = [
     {id: 'codex', title: 'Codex', login: 'https://chatgpt.com/', browser: true},
     {id: 'copilot', title: 'GitHub Copilot', login: 'https://github.com/login', browser: true, secret: ['GITHUB_TOKEN', 'GitHub personal access token']},
     {id: 'zai', title: 'Z.ai', login: 'https://z.ai/', secret: ['ZAI_TOKEN', 'API token']},
+    {id: 'gemini', title: 'Gemini (Antigravity)', command: 'agy'},
     {id: 'go', title: 'OpenCode Go', command: 'opencode auth login'},
     {id: 'zen', title: 'OpenCode Zen', login: 'https://opencode.ai/zen', browser: true},
     {id: 'openrouter', title: 'OpenRouter', login: 'https://openrouter.ai/keys', secret: ['OPENROUTER_API_KEY', 'Management key']},
     {id: 'deepseek', title: 'DeepSeek', login: 'https://platform.deepseek.com/api_keys', secret: ['DEEPSEEK_API_KEY', 'API key']},
     {id: 'moonshot', title: 'Kimi', login: 'https://platform.moonshot.ai/console/api-keys', secret: ['MOONSHOT_API_KEY', 'API key']},
+    {id: 'colab', title: 'Google Colab', command: 'colab usage'},
 ];
 const BROWSERS = ['', 'chrome', 'chromium', 'brave', 'edge', 'firefox', 'helium'];
 
@@ -278,6 +280,7 @@ export default class AgentQuotaPreferences extends ExtensionPreferences {
         appearance.add(colors);
         const popup = new Adw.PreferencesGroup({title: 'Popup'});
         addSwitch(popup, settings, 'show-settings-action', 'Show Settings action at the bottom of the popup');
+        addSwitch(popup, settings, 'show-user-info', 'Show user information', 'Show the account name next to each provider plan. Turn off to show only the plan.');
         addSpin(popup, settings, 'provider-padding', 'Provider group padding', 'Vertical padding around each provider.', 0, 24);
         addSpin(popup, settings, 'metric-spacing', 'Metric spacing', 'Vertical spacing between quota rows.', 0, 20);
         addSpin(popup, settings, 'popup-width', 'Popup width', 'Wider values create more space between provider and account information.', 260, 720);

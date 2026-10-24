@@ -60,9 +60,14 @@ PROVIDER_META: dict[str, ProviderMeta] = {
         Path("~/.config/agent-quota/zai.conf").expanduser(),
         "Z.ai API token",
     ),
+    "gemini": ProviderMeta(
+        "Gemini",
+        "Gemini (Antigravity) 5h / 7d quota pools (agy OAuth in keyring)",
+        "usage",
+    ),
     "go": ProviderMeta(
         "OpenCode",
-        "OpenCode Go 5h / weekly / monthly subscription usage (opencode auth)",
+        "OpenCode Go 5h / 7d / monthly subscription usage (opencode auth)",
         "usage",
     ),
     "zen": ProviderMeta(
@@ -93,6 +98,11 @@ PROVIDER_META: dict[str, ProviderMeta] = {
         "MOONSHOT_API_KEY",
         Path("~/.config/agent-quota/moonshot.conf").expanduser(),
         "Moonshot API key",
+    ),
+    "colab": ProviderMeta(
+        "Colab",
+        "Google Colab compute-unit balance (colab-cli OAuth)",
+        "usage",
     ),
 }
 
@@ -314,18 +324,18 @@ def _adapt_zai(raw: dict) -> list[Metric]:
         unit = limit.get("unit")
 
         if limit_type == "TOKENS_LIMIT":
-            label = "5h" if unit == 3 else "Weekly" if unit == 6 else "Tokens"
+            label = "5h" if unit == 3 else "7d" if unit == 6 else "Tokens"
             value = f"{pct:.0f}%"
         elif limit_type == "TIME_LIMIT":
             label = "MCP"
             value = _remaining_value(limit, pct)
         else:
             # Unknown/bonus type: label from the same unit codes the known
-            # types use (unit 3 -> 5h, unit 6 -> weekly), falling back to
+            # types use (unit 3 -> 5h, unit 6 -> 7d), falling back to
             # the type name itself; the value renders generically.
             label = (
                 "5h" if unit == 3
-                else "Weekly" if unit == 6
+                else "7d" if unit == 6
                 else str(limit_type or "Window").replace("_", " ").title()
             )
             value = _remaining_value(limit, pct)
@@ -349,11 +359,55 @@ def _adapt_zen(raw: dict) -> list[Metric]:
     return [Metric("Balance", f"${bal:.2f}", None, "—")]
 
 
+def _adapt_gemini(raw: dict) -> list[Metric]:
+    from providers.antigravity import gemini_usage_windows
+
+    metrics: list[Metric] = []
+    for label, window in gemini_usage_windows(raw):
+        used_pct = float(window["usage_percent"])
+        pct = max(0.0, min(100.0, 100.0 - used_pct))
+        reset_at = window.get("reset_at")
+        metrics.append(
+            Metric(
+                label,
+                f"{pct:.0f}%",
+                pct,
+                _pad_reset(format_eta(reset_at)) if reset_at else "—",
+                is_remaining=True,
+                is_blocking_period=window.get("window") == "weekly",
+            )
+        )
+    return metrics
+
+
+def _plan_gemini(raw: dict) -> str:
+    identity = raw.get("identity") or {}
+    plan_id = identity.get("plan")
+    if plan_id not in (None, ""):
+        # Cloud Code tier ids look like "free-tier"/"pro-tier"; the tier
+        # suffix is noise for the display label.
+        return _format_plan_value(str(plan_id).replace("-tier", ""))
+    plan_name = identity.get("plan_name")
+    if plan_name not in (None, ""):
+        return _format_plan_value(plan_name)
+    return "Unknown"
+
+
+def _user_gemini(raw: dict) -> str:
+    identity = raw.get("identity") or {}
+    return identity.get("email") or "Unknown"
+
+
 def _adapt_go(raw: dict) -> list[Metric]:
     from providers.go import go_usage_windows
 
     metrics: list[Metric] = []
     for label, w in go_usage_windows(raw):
+        # The provider module may still emit the old "Weekly" label (or a
+        # cached payload may carry it); display and constraint logic both key
+        # off the 7d window, so normalize before rendering.
+        if label == "Weekly":
+            label = "7d"
         used_pct = float(w["usage_percent"])
         pct = max(0.0, min(100.0, 100.0 - used_pct))
         reset_at = w.get("reset_at")
@@ -371,7 +425,7 @@ def _adapt_go(raw: dict) -> list[Metric]:
                 pct,
                 reset,
                 is_remaining=True,
-                is_blocking_period=label == "Weekly",
+                is_blocking_period=label == "7d",
             )
         )
     return metrics
@@ -611,6 +665,12 @@ def _fetch_zen(browsers):
     return get_zen_balance(browsers)
 
 
+def _fetch_gemini(browsers):
+    from providers.antigravity import get_gemini_usage
+
+    return get_gemini_usage(browsers)
+
+
 def _fetch_go(browsers):
     from providers.go import get_go_usage
 
@@ -638,6 +698,44 @@ def _adapt_moonshot(raw: dict) -> list[Metric]:
         # which is the one thing worth surfacing in a one-line balance row.
         value += " — exhausted"
     return [Metric(currency, value, None, "—")]
+
+
+# Colab's ccu-info endpoint reports a raw CU balance with no upper bound, so a
+# usage bar needs a full-scale reference. 200 CU is the Google AI plan allowance
+# the bar is drawn against; balances above it keep their real value and simply
+# pin the bar at 100%.
+COLAB_BAR_CAP_CU = 200.0
+COLAB_PLAN = "Google AI Plans"
+
+
+def _plan_colab(raw: dict) -> str:
+    # ccu-info carries no subscription/tier field, so the plan label is static.
+    return COLAB_PLAN
+
+
+def _adapt_colab(raw: dict) -> list[Metric]:
+    def number(field: str) -> float:
+        # Strict on purpose: a malformed cache entry must surface as an error
+        # row rather than a confident "0.00 CU remaining".
+        value = raw.get(field)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise RuntimeError(f"non-numeric {field} ({value!r})")
+        return float(value)
+
+    balance = number("balance")
+    # Only the remaining CU balance is a meaningful normalized metric. Rate and
+    # active-machine counts are point-in-time facts, not quota, and the API
+    # exposes no reliable subscription reset, so the reset column stays "—".
+    pct = max(0.0, min(100.0, balance / COLAB_BAR_CAP_CU * 100.0))
+    return [
+        Metric(
+            "Balance",
+            f"{balance:.2f} CU remaining",
+            pct,
+            "—",
+            is_remaining=True,
+        )
+    ]
 
 
 def _fetch_openrouter(browsers):
@@ -676,6 +774,12 @@ def _fetch_moonshot(browsers):
     return get_moonshot_balance(token, cfg.get("MOONSHOT_BASE_URL"))
 
 
+def _fetch_colab(browsers):
+    from providers.colab import get_colab_usage
+
+    return get_colab_usage(browsers)
+
+
 @dataclass
 class _Provider:
     name: str
@@ -697,44 +801,52 @@ def _build_providers() -> dict[str, _Provider]:
         "codex": _adapt_codex,
         "copilot": _adapt_copilot_factory(copilot_quota),
         "zai": _adapt_zai,
+        "gemini": _adapt_gemini,
         "zen": _adapt_zen,
         "go": _adapt_go,
         "openrouter": _adapt_openrouter,
         "deepseek": _adapt_deepseek,
         "moonshot": _adapt_moonshot,
+        "colab": _adapt_colab,
     }
     plans = {
         "claude": _plan_claude,
         "codex": _plan_codex,
         "copilot": _plan_copilot,
         "zai": _plan_zai,
+        "gemini": _plan_gemini,
         "zen": None,
         "go": _plan_go,
         "openrouter": None,
         "deepseek": None,
         "moonshot": None,
+        "colab": _plan_colab,
     }
     users = {
         "claude": _user_claude,
         "codex": _user_codex,
         "copilot": _user_copilot,
         "zai": None,
+        "gemini": _user_gemini,
         "zen": None,
         "go": _user_go,
         "openrouter": None,
         "deepseek": None,
         "moonshot": None,
+        "colab": None,
     }
     fetchers = {
         "claude": _fetch_claude,
         "codex": _fetch_codex,
         "copilot": _fetch_copilot,
         "zai": _fetch_zai,
+        "gemini": _fetch_gemini,
         "zen": _fetch_zen,
         "go": _fetch_go,
         "openrouter": _fetch_openrouter,
         "deepseek": _fetch_deepseek,
         "moonshot": _fetch_moonshot,
+        "colab": _fetch_colab,
     }
     return {
         key: _Provider(
@@ -947,10 +1059,12 @@ def fetch_one(
                     or identity.get("source")
                     or {
                         "zai": "api",
+                        "gemini": "agy oauth",
                         "go": "official api",
                         "zen": "browser",
                         "openrouter": "api",
                         "deepseek": "api",
+                        "colab": "colab-cli oauth",
                     }.get(key, "")
                 )
             if prov.plan:
@@ -1345,7 +1459,7 @@ def main() -> int:
     parser.add_argument(
         "--only",
         metavar="LIST",
-        help="Comma-separated providers (overrides config). Known: claude,codex,copilot,zai,zen,go,openrouter,deepseek,moonshot",
+        help="Comma-separated providers (overrides config). Known: claude,codex,copilot,zai,gemini,zen,go,openrouter,deepseek,moonshot,colab",
     )
     parser.add_argument(
         "--view",
