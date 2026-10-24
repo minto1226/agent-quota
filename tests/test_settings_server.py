@@ -130,13 +130,39 @@ class GnomeSectionTests(unittest.TestCase):
         self.assertEqual(parsed["enabled"], ["claude"])
         self.assertEqual(parsed["gnome"], {"meter-style": "bar"})
 
-    def test_replace_drops_previous_table(self) -> None:
-        contents = 'enabled = ["claude"]\n\n[gnome]\nmeter-style = "circle"\ncircle-radius = 20\n'
+    def test_replace_updates_in_place_and_keeps_unmanaged_keys(self) -> None:
+        contents = (
+            'enabled = ["claude"]\n\n[gnome]\n'
+            "# hand written\n"
+            'meter-style = "circle"\n'
+            "circle-radius = 20\n"
+            "warning-threshold = 25\n"
+        )
         updated = server.replace_gnome_section(contents, {"meter-style": "bar"})
         parsed = tomllib.loads(updated)
         self.assertEqual(parsed["enabled"], ["claude"])
-        self.assertEqual(parsed["gnome"], {"meter-style": "bar"})
-        self.assertNotIn("circle-radius", updated)
+        # The mirror owns meter-style only; the rest of the table survives.
+        self.assertEqual(
+            parsed["gnome"],
+            {"meter-style": "bar", "circle-radius": 20, "warning-threshold": 25},
+        )
+        self.assertIn("# hand written", updated)
+
+    def test_replace_keeps_quoted_keys_untouched(self) -> None:
+        contents = '[gnome]\n"warning-threshold" = 40\n"meter-style" = "bar"\n'
+        updated = server.replace_gnome_section(contents, {"meter-style": "circle"})
+        parsed = tomllib.loads(updated)
+        self.assertEqual(parsed["gnome"], {"warning-threshold": 40, "meter-style": "circle"})
+
+    def test_replace_appends_missing_keys_inside_the_table(self) -> None:
+        contents = '[gnome]\nwarning-threshold = 25\n\n[other]\nb = "x"\n'
+        updated = server.replace_gnome_section(contents, {"meter-style": "bar", "popup-width": 480})
+        parsed = tomllib.loads(updated)
+        self.assertEqual(
+            parsed["gnome"],
+            {"warning-threshold": 25, "meter-style": "bar", "popup-width": 480},
+        )
+        self.assertEqual(parsed["other"], {"b": "x"})
 
     def test_replace_preserves_later_tables(self) -> None:
         contents = '[gnome]\na = 1\n\n[other]\nb = "x"\n'
@@ -151,7 +177,29 @@ class GnomeSectionTests(unittest.TestCase):
             server.write_gnome_section(path, {"meter-style": "bar", "popup-width": 480})
             self.assertEqual(tomllib.loads(path.read_text())["gnome"], {"meter-style": "bar", "popup-width": 480})
             server.write_gnome_section(path, {"meter-style": "circle"})
-            self.assertEqual(tomllib.loads(path.read_text())["gnome"], {"meter-style": "circle"})
+            # Saving one key must not drop the others.
+            self.assertEqual(
+                tomllib.loads(path.read_text())["gnome"],
+                {"meter-style": "circle", "popup-width": 480},
+            )
+
+    def test_write_keeps_keys_it_does_not_manage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                'enabled = ["claude"]\n'
+                "\n"
+                "[gnome]\n"
+                "warning-threshold = 25\n"
+                "critical-threshold = 5\n"
+            )
+            server.write_gnome_section(path, {"refresh-seconds": 120})
+            data = tomllib.loads(path.read_text())
+            self.assertEqual(
+                data["gnome"],
+                {"warning-threshold": 25, "critical-threshold": 5, "refresh-seconds": 120},
+            )
+            self.assertEqual(data["enabled"], ["claude"])
 
     def test_load_section(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

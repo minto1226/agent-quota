@@ -319,35 +319,57 @@ def toml_value(value: object) -> str:
 
 
 def replace_gnome_section(contents: str, values: dict[str, object]) -> str:
-    """Return `contents` with its [gnome] table replaced by `values`.
+    """Write `values` into the [gnome] table, leaving the rest of it alone.
 
-    Everything outside the table is preserved verbatim.  A table header on
-    its own line ends the removed section, so a multi-line value inside it
-    cannot swallow the tables that follow.
+    The mirror only owns the keys it was handed: the table also carries
+    settings it does not manage (display thresholds) and anything a newer
+    version wrote, so untouched lines are preserved verbatim.  Everything
+    outside the table is preserved too; a table header on its own line ends
+    the section, so a multi-line value cannot swallow the tables that follow.
     """
-    kept: list[str] = []
-    skipping = False
-    for line in contents.splitlines():
-        stripped = line.strip()
-        if re.fullmatch(r"\[gnome\]\s*(#.*)?", stripped):
-            skipping = True
+    lines = contents.splitlines()
+    rendered = {key: f"{key} = {toml_value(values[key])}" for key in sorted(values)}
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if re.fullmatch(r"\[gnome\]\s*(#.*)?", line.strip())
+        ),
+        None,
+    )
+    if start is None:
+        section = ["[gnome]"] + [rendered[key] for key in sorted(rendered)]
+        prefix = "\n".join(lines).strip("\n")
+        if not prefix:
+            return "\n".join(CLI_CONFIG_HEADER.splitlines() + section) + "\n"
+        return f"{prefix}\n\n" + "\n".join(section) + "\n"
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if re.match(r"^\[[A-Za-z0-9_.\"'-]+\]\s*(#.*)?$", lines[index].strip()):
+            end = index
+            break
+
+    seen: set[str] = set()
+    for index in range(start + 1, end):
+        bare = lines[index].split("#", 1)[0].strip()
+        if "=" not in bare:
             continue
-        if skipping:
-            if re.match(r"^\[[A-Za-z0-9_.\"'-]+\]\s*(#.*)?$", stripped):
-                skipping = False
-                kept.append(line)
-            continue
-        kept.append(line)
-    section = ["[gnome]"]
-    section.extend(f"{key} = {toml_value(values[key])}" for key in sorted(values))
-    prefix = "\n".join(kept).strip("\n")
-    if not prefix:
-        return "\n".join(CLI_CONFIG_HEADER.splitlines() + section) + "\n"
-    return f"{prefix}\n\n" + "\n".join(section) + "\n"
+        key = bare.partition("=")[0].strip().strip("'\"")
+        if key in rendered:
+            lines[index] = rendered[key]
+            seen.add(key)
+
+    missing = [rendered[key] for key in sorted(rendered) if key not in seen]
+    insert_at = end
+    while insert_at > start + 1 and not lines[insert_at - 1].strip():
+        insert_at -= 1
+    lines[insert_at:insert_at] = missing
+    return "\n".join(lines).strip("\n") + "\n"
 
 
 def write_gnome_section(path: Path, values: dict[str, object]) -> None:
-    """Rewrite the [gnome] table of config.toml, creating the file if needed."""
+    """Merge `values` into the [gnome] table, creating the file if needed."""
     contents = path.read_text() if path.exists() else CLI_CONFIG_HEADER
     updated = replace_gnome_section(contents, values)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -426,28 +448,33 @@ class App:
     def _apply_cli_config(self) -> None:
         """Push the config.toml [gnome] table into GSettings.
 
-        config.toml is the source of truth, so values found there override
-        the current dconf state.  Unknown keys and type mismatches are
-        dropped (they get rewritten from GSettings below), and keys missing
-        from the table are topped up so the file always carries the whole
-        schema and stays portable.
+        config.toml is the source of truth, so values found there override the
+        current dconf state.  Keys the schema does not know are warned about and
+        left in the file: the table also carries settings this mirror does not
+        manage, and dropping them would be destructive.  Keys missing from the
+        table are topped up so the file always describes the whole schema and
+        stays portable.
         """
         section = load_gnome_section(self.cli_config_path)
-        for key in list(section):
+        applied: set[str] = set()
+        for key, value in section.items():
             if key not in self.backend.keys:
                 sys.stderr.write(f"ignoring unknown setting {key!r} in {self.cli_config_path}\n")
-                del section[key]
                 continue
             try:
-                self.backend.set(key, section[key])
+                self.backend.set(key, value)
             except ValueError as error:
                 sys.stderr.write(f"ignoring {key!r} in {self.cli_config_path}: {error}\n")
-                del section[key]
-        missing = sorted(self.backend.keys - section.keys())
+                continue
+            applied.add(key)
+        missing = sorted(self.backend.keys - applied)
         if not missing:
             return
         try:
-            write_gnome_section(self.cli_config_path, {**section, **{key: self.backend.get(key) for key in missing}})
+            write_gnome_section(
+                self.cli_config_path,
+                {key: self.backend.get(key) for key in missing},
+            )
         except Exception as error:
             sys.stderr.write(f"could not update {self.cli_config_path}: {error}\n")
 
