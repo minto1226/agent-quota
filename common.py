@@ -168,6 +168,9 @@ _LINUX_CHROMIUM_COOKIE_GLOBS: Mapping[str, tuple[str, ...]] = {
         "~/.var/app/com.opera.Opera/config/opera-beta/Cookies",
         "~/.var/app/com.opera.Opera/config/opera-developer/Cookies",
     ),
+    # browser_cookie3.Arc inherits from ChromiumBased and queries the Linux
+    # keyring in __init__ before failing on linux_cookies=None.
+    "arc": (),
 }
 
 
@@ -176,7 +179,7 @@ def _has_cookie_file(name: str) -> bool:
     if not (sys.platform.startswith("linux") or "bsd" in sys.platform.lower()):
         return True
     patterns = _LINUX_CHROMIUM_COOKIE_GLOBS.get(name)
-    if not patterns:
+    if patterns is None:
         return True
     for pattern in patterns:
         for match in glob.glob(os.path.expanduser(pattern)):
@@ -192,8 +195,14 @@ def helium(cookie_file=None, domain_name="", key_file=None):
     with Helium's cookie file path.
     """
     if cookie_file is None:
-        cookie_file = os.path.expanduser("~/.config/net.imput.helium/Default/Cookies")
-    if not os.path.isfile(cookie_file):
+        for pattern in _LINUX_CHROMIUM_COOKIE_GLOBS["helium"]:
+            for match in sorted(glob.glob(os.path.expanduser(pattern))):
+                if os.path.isfile(match):
+                    cookie_file = match
+                    break
+            if cookie_file is not None:
+                break
+    if not cookie_file or not os.path.isfile(cookie_file):
         raise browser_cookie3.BrowserCookieError("Failed to find cookies for Helium browser")
     return browser_cookie3.chromium(cookie_file=cookie_file, domain_name=domain_name, key_file=key_file)
 

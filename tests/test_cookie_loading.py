@@ -135,6 +135,53 @@ class CookieFilePrecheckTests(unittest.TestCase):
         chrome_loader.assert_called_once_with(domain_name="github.com")
         brave_loader.assert_called_once_with(domain_name="github.com")
 
+    def test_helium_falls_back_to_numbered_profile_when_default_missing(self) -> None:
+        profile_cookie = self._touch(".config/net.imput.helium/Profile 1/Cookies")
+
+        with mock.patch.object(
+            common.browser_cookie3,
+            "chromium",
+            return_value=_fake_jar({"sid": "helium-profile"}),
+        ) as chromium_loader:
+            candidates = common.load_cookie_candidates("chatgpt.com", ["helium"])
+
+        self.assertEqual(candidates, [({"sid": "helium-profile"}, "helium")])
+        chromium_loader.assert_called_once_with(
+            cookie_file=str(profile_cookie),
+            domain_name="chatgpt.com",
+            key_file=None,
+        )
+
+    def test_arc_skipped_on_linux_without_keyring_lookup(self) -> None:
+        self.assertFalse(common._has_cookie_file("arc"))
+
+        with mock.patch.object(
+            common.browser_cookie3,
+            "arc",
+            side_effect=AssertionError("arc loader must not be called on Linux"),
+        ) as arc_loader:
+            with self.assertRaises(RuntimeError):
+                common.load_cookie_candidates("chatgpt.com", ["arc"])
+
+        arc_loader.assert_not_called()
+
+    def test_other_chromium_family_browsers_unaffected(self) -> None:
+        cases = (
+            ("chrome", ".config/google-chrome/Default/Cookies"),
+            ("chromium", ".config/chromium/Default/Cookies"),
+            ("brave", ".config/BraveSoftware/Brave-Browser/Default/Cookies"),
+            ("edge", ".config/microsoft-edge/Default/Cookies"),
+            ("helium", ".config/net.imput.helium/Default/Cookies"),
+            ("vivaldi", ".config/vivaldi/Default/Cookies"),
+            ("opera", ".config/opera/Cookies"),
+        )
+        for browser_name, _ in cases:
+            self.assertFalse(common._has_cookie_file(browser_name))
+
+        for browser_name, rel_path in cases:
+            self._touch(rel_path)
+            self.assertTrue(common._has_cookie_file(browser_name))
+
 
 if __name__ == "__main__":
     unittest.main()
