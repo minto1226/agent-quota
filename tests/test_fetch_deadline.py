@@ -62,16 +62,22 @@ class FetchAllDeadlineTests(unittest.TestCase):
             codex_scoped_marker = cache_dir / "codex:chrome.updating"
             codex_cache = cache_dir / "codex.json"
             gemini_marker = cache_dir / "gemini.updating"
-            for path in (
-                codex_marker,
-                codex_scoped_marker,
-                codex_cache,
-                gemini_marker,
-            ):
+            for path in (codex_cache, gemini_marker):
                 path.write_text("{}")
 
+            def hung_codex(_browsers):
+                codex_marker.touch()
+                codex_scoped_marker.touch()
+                self._stop.wait(5.0)
+                return {}
+
             providers = {
-                "codex": self._hung_provider("Codex"),
+                "codex": _Provider(
+                    name="Codex",
+                    mode="usage",
+                    fetch=hung_codex,
+                    adapt=lambda _raw: [],
+                ),
                 "gemini": self._ok_provider("Gemini"),
             }
             with mock.patch.object(common, "CACHE_DIR", cache_dir):
@@ -81,6 +87,79 @@ class FetchAllDeadlineTests(unittest.TestCase):
             self.assertFalse(codex_scoped_marker.exists())
             self.assertTrue(codex_cache.exists())
             self.assertTrue(gemini_marker.exists())
+
+    def test_preserves_preexisting_updating_marker_from_another_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            codex_marker = cache_dir / "codex.updating"
+            codex_marker.write_text("{}")
+
+            providers = {
+                "codex": self._hung_provider("Codex"),
+                "gemini": self._ok_provider("Gemini"),
+            }
+            with mock.patch.object(common, "CACHE_DIR", cache_dir):
+                fetch_all(providers, None, timeout=0.05)
+
+            self.assertTrue(codex_marker.exists())
+
+    def test_preserves_updating_marker_refreshed_by_another_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            codex_marker = cache_dir / "codex.updating"
+            codex_marker.write_text("{}")
+            now = time.time()
+
+            with mock.patch.object(common, "CACHE_DIR", cache_dir):
+                agent_quota._clear_updating_markers(
+                    "codex",
+                    started_at=now - 30.0,
+                    pre_existing={},
+                    now=now,
+                )
+
+            self.assertTrue(codex_marker.exists())
+
+    def test_repeated_timeouts_reuse_in_flight_thread_without_accumulating(
+        self,
+    ) -> None:
+        call_count = 0
+        release = threading.Event()
+
+        def slow_fetch(_browsers):
+            nonlocal call_count
+            call_count += 1
+            release.wait(5.0)
+            return {"source": "browser"}
+
+        providers = {
+            "codex": _Provider(
+                name="Codex",
+                mode="usage",
+                fetch=slow_fetch,
+                adapt=lambda _raw: [Metric("5h", "75%", 75, is_remaining=True)],
+            ),
+        }
+
+        try:
+            first = fetch_all(providers, None, timeout=0.05)
+            second = fetch_all(providers, None, timeout=0.05)
+
+            self.assertEqual(first[0].state, "net_err")
+            self.assertEqual(second[0].state, "net_err")
+            self.assertEqual(call_count, 1)
+
+            timer = threading.Timer(0.02, release.set)
+            timer.start()
+            try:
+                recovered = fetch_all(providers, None, timeout=1.0)
+            finally:
+                timer.cancel()
+            self.assertEqual(recovered[0].state, "ok")
+            self.assertEqual(recovered[0].metrics[0].value, "75%")
+            self.assertEqual(call_count, 1)
+        finally:
+            release.set()
 
 
 if __name__ == "__main__":
