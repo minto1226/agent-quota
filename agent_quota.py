@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
 import tomllib
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
+import common
 from common import format_eta, parse_window_direct, parse_window_percent
 
 CONFIG_PATH = Path("~/.config/agent-quota/config.toml").expanduser()
@@ -1079,22 +1081,89 @@ def fetch_one(
     return statuses
 
 
+PROVIDER_FETCH_TIMEOUT = 30.0
+
+
+def _submit_provider(
+    fn: Callable[..., list[ProviderStatus]], *args: object
+) -> Future[list[ProviderStatus]]:
+    """Run a provider fetch on a daemon thread so a hung call cannot block exit."""
+    fut: Future[list[ProviderStatus]] = Future()
+
+    def _run() -> None:
+        if not fut.set_running_or_notify_cancel():
+            return
+        try:
+            fut.set_result(fn(*args))
+        except BaseException as exc:
+            fut.set_exception(exc)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return fut
+
+
+def _clear_updating_markers(key: str) -> None:
+    """Remove any cache .updating markers left behind by a timed-out provider."""
+    try:
+        for pattern in (f"{key}.updating", f"{key}[-:_]*.updating"):
+            for marker in common.CACHE_DIR.glob(pattern):
+                marker.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def fetch_all(
     providers: dict[str, _Provider],
     browsers: list[str] | None,
     provider_browsers: dict[str, list[str]] | None = None,
+    timeout: float | None = PROVIDER_FETCH_TIMEOUT,
 ) -> list[ProviderStatus]:
     """Fetch every provider; ``provider_browsers`` overrides ``browsers`` per key."""
     provider_browsers = provider_browsers or {}
     results: dict[str, list[ProviderStatus]] = {}
-    with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
-        futs = {
-            pool.submit(fetch_one, k, p, provider_browsers.get(k, browsers)): k
-            for k, p in providers.items()
-        }
-        for fut in as_completed(futs):
+    futs = {
+        _submit_provider(fetch_one, k, p, provider_browsers.get(k, browsers)): k
+        for k, p in providers.items()
+    }
+    try:
+        for fut in as_completed(futs, timeout=timeout):
             k = futs[fut]
             results[k] = fut.result()
+    except TimeoutError:
+        pass
+
+    for fut, k in futs.items():
+        if k in results:
+            continue
+        if fut.done():
+            try:
+                results[k] = fut.result()
+                continue
+            except Exception as exc:
+                prov = providers[k]
+                results[k] = [
+                    ProviderStatus(
+                        key=k,
+                        name=prov.name,
+                        mode=prov.mode,
+                        state=_classify(exc),
+                        error=str(exc).splitlines()[0][:120],
+                    )
+                ]
+                continue
+        fut.cancel()
+        _clear_updating_markers(k)
+        prov = providers[k]
+        results[k] = [
+            ProviderStatus(
+                key=k,
+                name=prov.name,
+                mode=prov.mode,
+                state="net_err",
+                error=f"Timed out after {timeout:g}s",
+            )
+        ]
+
     return [status for key in providers for status in results[key]]
 
 
